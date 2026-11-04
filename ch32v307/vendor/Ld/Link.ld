@@ -136,6 +136,8 @@ SECTIONS
 
 	.data :
 	{
+        /* Copied by the existing startup data loop; executable SRAM hot code. */
+        *(.highcode .highcode.*)
     	*(.gnu.linkonce.r.*)
     	*(.data .data.*)
     	*(.gnu.linkonce.d.*)

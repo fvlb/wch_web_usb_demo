@@ -1,0 +1,84 @@
+{
+  "image": "ch32v307/_build/safe512/app.bin",
+  "fallback": "ch32v307/_build/baseline/app.bin",
+  "image_sha256": "d33689e2627ca20de818e6c22fbf32f8a7886d61f5b6632f3519237c1c00419e",
+  "queue": 16,
+  "request_bytes": 65536,
+  "runs": 3,
+  "uuid": "263e972bf5a4383b",
+  "chip": "CH32V307",
+  "resource": "WCH-LINK-F3388F06781D",
+  "pattern": false,
+  "commands": [
+    {
+      "argv": [
+        "/home/fiskov-v-b/Downloads/Prog/wch/ch32fun/minichlink/minichlink",
+        "-i",
+        "-e"
+      ],
+      "returncode": 0,
+      "stdout": "USER/RDPR  : c03f/5aa5\nDATA1/DATA0: ff00/ff00\nWRPR1/WRPR0: 00ff/00ff\nWRPR3/WRPR2: 00ff/00ff\nR32_ESIG_UNIID1: 263e972b\nR32_ESIG_UNIID2: f5a4383b\nR32_ESIG_UNIID3: ffffffff\n",
+      "stderr": "minichlink version - 70366cd5a4f6815267560a1382a88352b1ebeb13\nFound WCH Link\nWCH Programmer is LinkE version 2.20\nDetected CH32V307\nFlash Storage: 288 kB\nPart UUID: 26-3e-97-2b-f5-a4-38-3b\nPart Type: 30-70-05-18\nRead protection: disabled\nInterface Setup\n"
+    },
+    {
+      "argv": [
+        "/home/fiskov-v-b/.local/bin/station-mutex",
+        "protect",
+        "--label",
+        "CH32V307 flash + readback",
+        "WCH-LINK-F3388F06781D",
+        "--",
+        "/home/fiskov-v-b/Downloads/Prog/wch/ch32fun/minichlink/minichlink",
+        "-w",
+        "ch32v307/_build/safe512/app.bin",
+        "0x08000000",
+        "-r",
+        "ch32v307/_build/usbhs-session/safe512.candidate.readback.bin",
+        "flash",
+        "16192",
+        "-a",
+        "-b"
+      ],
+      "returncode": 0,
+      "stdout": "Writing image\n\nImage written.\nRead 16192 bytes\n",
+      "stderr": "minichlink version - 70366cd5a4f6815267560a1382a88352b1ebeb13\nFound WCH Link\nWCH Programmer is LinkE version 2.20\nDetected CH32V307\nFlash Storage: 288 kB\nPart UUID: 26-3e-97-2b-f5-a4-38-3b\nPart Type: 30-70-05-18\nRead protection: disabled\nInterface Setup\nDetecting Memory Area\n"
+    },
+    {
+      "argv": [
+        "ch585m/_build/tools/bmp-bench",
+        "16",
+        "65536",
+        "3"
+      ],
+      "returncode": 1,
+      "stdout": "",
+      "stderr": "No accessible demo 1209:0001\n"
+    },
+    {
+      "argv": [
+        "/home/fiskov-v-b/.local/bin/station-mutex",
+        "protect",
+        "--label",
+        "CH32V307 flash + readback",
+        "WCH-LINK-F3388F06781D",
+        "--",
+        "/home/fiskov-v-b/Downloads/Prog/wch/ch32fun/minichlink/minichlink",
+        "-w",
+        "ch32v307/_build/baseline/app.bin",
+        "0x08000000",
+        "-r",
+        "ch32v307/_build/usbhs-session/safe512.restore.readback.bin",
+        "flash",
+        "13388",
+        "-a",
+        "-b"
+      ],
+      "returncode": 0,
+      "stdout": "Writing image\n\nImage written.\nRead 13388 bytes\n",
+      "stderr": "minichlink version - 70366cd5a4f6815267560a1382a88352b1ebeb13\nFound WCH Link\nWCH Programmer is LinkE version 2.20\nDetected CH32V307\nFlash Storage: 288 kB\nPart UUID: 26-3e-97-2b-f5-a4-38-3b\nPart Type: 30-70-05-18\nRead protection: disabled\nInterface Setup\nDetecting Memory Area\n"
+    }
+  ],
+  "success": false,
+  "error": "Command '['ch585m/_build/tools/bmp-bench', '16', '65536', '3']' returned non-zero exit status 1.",
+  "restored": true
+}

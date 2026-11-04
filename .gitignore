@@ -221,4 +221,5 @@ source/check-style.log
 obj
 _build
 ch585m/backups/*.bin
+ch32v307/backups/*.bin
 __pycache__/

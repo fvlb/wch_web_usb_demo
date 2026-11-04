@@ -49,25 +49,67 @@ static volatile uint8_t s_active = 0;
 
 /* Pixel-walk generation position. Owned exclusively by FileXfer_Pump()
  * (main-loop context): the ISR never generates, so no locking needed. */
-static uint32_t s_genPos;
-static uint32_t s_col;         /* 0 .. FILEXFER_IMG_WIDTH-1 */
-static uint32_t s_channel;     /* 0=Blue, 1=Green, 2=Red    */
-static uint32_t s_actualRow;   /* counts down from HEIGHT-1 */
+static volatile uint32_t s_genPos; /* Completed, not submitted, DMA bytes. */
+static uint16_t s_pendingLen;
 
 /* Colorful gradient with zero-copy serving: four rotating row buffers;
  * the pump generates rows a few ahead of the send position (cheap LUT
  * walk per row) while the endpoint DMA reads finished rows directly. */
 #define ROW_BYTES   (FILEXFER_IMG_WIDTH * 3u)
-#define ROW_BUF_CNT 4u
-static uint8_t s_rows[ROW_BUF_CNT][ROW_BYTES];
+#ifndef FILEXFER_ROW_BUF_CNT
+#define FILEXFER_ROW_BUF_CNT 4u
+#endif
+#define ROW_BUF_CNT FILEXFER_ROW_BUF_CNT
+#if ROW_BUF_CNT < 2 || ROW_BUF_CNT > 4
+#error "V307 producer supports 2..4 rows in the existing 32 KiB RAM layout"
+#endif
+typedef union
+{
+    uint8_t bytes[ROW_BYTES];
+    uint32_t words[ROW_BYTES / 4u];
+} FileRow;
+static FileRow s_rows[ROW_BUF_CNT] __attribute__((aligned(4)));
 static uint8_t s_blueByCol[FILEXFER_IMG_WIDTH];
 static uint8_t s_greenByRow[FILEXFER_IMG_HEIGHT];
-static uint32_t s_genRow = 0;   /* rows fully generated: 0..HEIGHT */
+static volatile uint32_t s_genRow = 0; /* Fully generated and published rows. */
 
-static void GenerateRow(uint32_t rowFromTop)
+#ifndef FILEXFER_RAM_GENERATOR
+#define FILEXFER_RAM_GENERATOR 0
+#endif
+#ifndef FILEXFER_PACKED_GENERATOR
+#define FILEXFER_PACKED_GENERATOR 0
+#endif
+#if FILEXFER_RAM_GENERATOR
+#define FILEXFER_HOT __attribute__((section(".highcode")))
+#else
+#define FILEXFER_HOT
+#endif
+#if FILEXFER_PACKED_GENERATOR
+static uint32_t s_blueWords[ROW_BYTES / 4u];
+#endif
+
+static FILEXFER_HOT void GenerateRow(uint32_t rowFromTop)
 {
-    uint8_t *dst = s_rows[rowFromTop % ROW_BUF_CNT];
     uint8_t green = s_greenByRow[FILEXFER_IMG_HEIGHT - 1u - rowFromTop];
+#if FILEXFER_PACKED_GENERATOR
+    uint32_t *dst = s_rows[rowFromTop % ROW_BUF_CNT].words;
+    const uint32_t *blue = s_blueWords;
+    uint32_t g0 = (uint32_t)green << 8;
+    uint32_t g1 = (uint32_t)green | ((uint32_t)green << 24);
+    uint32_t g2 = (uint32_t)green << 16;
+    uint8_t red = (uint8_t)(FILEXFER_IMG_HEIGHT - 1u - rowFromTop);
+    for (uint32_t col = 0; col < FILEXFER_IMG_WIDTH; col += 4)
+    {
+        dst[0] = blue[0] | g0 | ((uint32_t)red << 16);
+        dst[1] = blue[1] | g1 | ((uint32_t)(uint8_t)(red + 1) << 8);
+        dst[2] = blue[2] | g2 | (uint32_t)(uint8_t)(red + 2) |
+                 ((uint32_t)(uint8_t)(red + 3) << 24);
+        dst += 3;
+        blue += 3;
+        red = (uint8_t)(red + 4);
+    }
+#else
+    uint8_t *dst = s_rows[rowFromTop % ROW_BUF_CNT].bytes;
     uint32_t col;
     for (col = 0; col < FILEXFER_IMG_WIDTH; col++)
     {
@@ -75,8 +117,9 @@ static void GenerateRow(uint32_t rowFromTop)
         *dst++ = green;
         *dst++ = (uint8_t)(col + (FILEXFER_IMG_HEIGHT - 1u - rowFromTop));
     }
+#endif
 }
-static uint8_t s_header[FILEXFER_BMP_HEADER_LEN];
+static uint8_t s_header[FILEXFER_BMP_HEADER_LEN] __attribute__((aligned(4)));
 
 /* Builds the 54-byte BMP header into 'hdr'. */
 static void BuildBmpHeader(uint8_t *hdr)
@@ -111,22 +154,6 @@ static void BuildBmpHeader(uint8_t *hdr)
     hdr[50] = 0; hdr[51] = 0; hdr[52] = 0; hdr[53] = 0; /* important colors */
 }
 
-/* Advances the incremental pixel-walk state by exactly one byte. */
-static inline void AdvancePixelState(void)
-{
-    s_channel++;
-    if (s_channel >= 3u)
-    {
-        s_channel = 0;
-        s_col++;
-        if (s_col >= FILEXFER_IMG_WIDTH)
-        {
-            s_col = 0;
-            s_actualRow--;
-        }
-    }
-}
-
 /* Generates up to 'maxlen' bytes starting at the current s_genPos into
  * 'buf', advancing s_genPos and the pixel-walk state accordingly.
  * Returns the number of bytes written (0 only if s_genPos was already
@@ -141,11 +168,14 @@ void FileXfer_Pump(void)
     {
         s_startReq = 0;
         s_genPos = 0;
+        s_pendingLen = 0;
         s_genRow = 0;
         s_active = 1;
         while ((s_genRow < ROW_BUF_CNT - 1u) && (s_genRow < FILEXFER_IMG_HEIGHT))
         {
-            GenerateRow(s_genRow++);
+            GenerateRow(s_genRow);
+            __asm volatile("" ::: "memory");
+            s_genRow++;
         }
         s_needArm = 1;
     }
@@ -156,7 +186,9 @@ void FileXfer_Pump(void)
         uint32_t sendRow = (s_genPos - FILEXFER_BMP_HEADER_LEN) / ROW_BYTES;
         while ((s_genRow < sendRow + ROW_BUF_CNT - 1u) && (s_genRow < FILEXFER_IMG_HEIGHT))
         {
-            GenerateRow(s_genRow++);
+            GenerateRow(s_genRow);
+            __asm volatile("" ::: "memory");
+            s_genRow++;
         }
     }
 
@@ -170,21 +202,6 @@ void FileXfer_Pump(void)
         s_needArm = 0;
         USBD_EP2_StartTransfer();
     }
-    else if (s_active)
-    {
-        static uint32_t s_stuck = 0;
-        static uint32_t s_lastPos = 0;
-        if (s_genPos != s_lastPos)
-        {
-            s_lastPos = s_genPos;
-            s_stuck = 0;
-        }
-        else if (++s_stuck >= 100000u)
-        {
-            s_stuck = 0;
-            USBHSD->UEP2_TX_CTRL ^= USBHS_UEP_T_TOG_DATA1; /* data-toggle resync */
-        }
-    }
 }
 
 /* USB-interrupt-context callback: pops the next ready packet from the
@@ -194,6 +211,8 @@ void FileXfer_Pump(void)
  * s_needArm). */
 static uint16_t FileXfer_FillCallback(const uint8_t **pptr, uint16_t maxlen)
 {
+    s_genPos += s_pendingLen;
+    s_pendingLen = 0;
     uint32_t pos = s_genPos;
     uint32_t remain = FILEXFER_TOTAL_SIZE - pos;
 
@@ -209,7 +228,7 @@ static uint16_t FileXfer_FillCallback(const uint8_t **pptr, uint16_t maxlen)
          * later packet is 512-aligned inside a 3072-byte row */
         uint16_t n = (maxlen < FILEXFER_BMP_HEADER_LEN) ? maxlen : (uint16_t)FILEXFER_BMP_HEADER_LEN;
         *pptr = s_header;
-        s_genPos += n;
+        s_pendingLen = n;
         return n;
     }
 
@@ -218,7 +237,12 @@ static uint16_t FileXfer_FillCallback(const uint8_t **pptr, uint16_t maxlen)
         uint32_t rowLen = ROW_BYTES;
         uint32_t row = pix / rowLen;
         uint32_t off = pix % rowLen;
-        const uint8_t *src = s_rows[row % ROW_BUF_CNT];
+        if (row >= s_genRow)
+        {
+            s_needArm = 1;
+            return 0;
+        }
+        const uint8_t *src = s_rows[row % ROW_BUF_CNT].bytes;
         uint32_t avail = rowLen - off;
         if (avail > remain)
         {
@@ -229,7 +253,7 @@ static uint16_t FileXfer_FillCallback(const uint8_t **pptr, uint16_t maxlen)
             avail = maxlen;
         }
         *pptr = &src[off];
-        s_genPos += avail;
+        s_pendingLen = (uint16_t)avail;
         return (uint16_t)avail;
     }
 }
@@ -248,6 +272,15 @@ void FileXfer_Init(void)
     {
         s_greenByRow[i] = (uint8_t)((i * 255u) / (FILEXFER_IMG_HEIGHT - 1u));
     }
+#if FILEXFER_PACKED_GENERATOR
+    for (i = 0; i < FILEXFER_IMG_WIDTH; i += 4)
+    {
+        uint32_t *words = &s_blueWords[(i / 4) * 3];
+        words[0] = (uint32_t)s_blueByCol[i] | ((uint32_t)s_blueByCol[i + 1] << 24);
+        words[1] = (uint32_t)s_blueByCol[i + 2] << 16;
+        words[2] = (uint32_t)s_blueByCol[i + 3] << 8;
+    }
+#endif
 
     USBD_EP2_SetFillCallback(FileXfer_FillCallback);
 }
@@ -256,5 +289,6 @@ void FileXfer_Start(void)
 {
     /* Called from EP0 SETUP (USB ISR) context: only record the request;
      * FileXfer_Pump() in the main loop does the reset + prefill + arm. */
+    USBD_EP2_StopTransfer();
     s_startReq = 1;
 }

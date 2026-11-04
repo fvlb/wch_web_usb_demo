@@ -19,6 +19,13 @@
 #include "ch32v30x_usb.h"
 #include "usb_desc.h"
 
+#ifndef USBHS_EP2_DOUBLE_BUFFER
+#define USBHS_EP2_DOUBLE_BUFFER 0
+#endif
+#ifndef USBHS_INT_BUSY_ENABLE
+#define USBHS_INT_BUSY_ENABLE 1
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -27,11 +34,12 @@ extern "C" {
 
 /* demo API surface - identical to the CH592F/CH585M stacks */
 #include <stdint.h>
-volatile extern uint8_t USBD_EP1_TxBusy;
+extern volatile uint8_t USBD_EP1_TxBusy;
 typedef uint16_t (*USBD_EP2_FillCallback)(const uint8_t **pptr, uint16_t maxlen);
 uint8_t USBD_EP1_SendData(const uint8_t *pbuf, uint8_t len);
 void    USBD_EP2_SetFillCallback(USBD_EP2_FillCallback cb);
 void    USBD_EP2_StartTransfer(void);
+void    USBD_EP2_StopTransfer(void);
 void    USBD_Device_Init(void);
 
 /*******************************************************************************/
@@ -134,4 +142,3 @@ extern uint8_t USBHS_Endp_DataUp( uint8_t endp, uint8_t *pbuf, uint16_t len, uin
 #endif
 
 #endif
-

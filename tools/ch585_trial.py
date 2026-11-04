@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Flash/readback/test one CH585 experiment; restore known-good firmware on failure.
+"""Flash/readback/test a WCH experiment; restore known-good firmware on failure.
 
-Run the entire script under station-mutex for the CH585's own UUID resource.
+Run the entire script under station-mutex for the board/probe resource.
 The cabinet/station resource is unrelated to this demoboard.
 """
 import argparse
@@ -14,7 +14,7 @@ import sys
 import time
 
 
-def main():
+def main(default_chip="CH585"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", type=pathlib.Path, required=True)
     parser.add_argument("--fallback", type=pathlib.Path, required=True)
@@ -25,9 +25,14 @@ def main():
     parser.add_argument("--request-bytes", type=int, default=65536)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--pattern", action="store_true", help="Diagnostic static pattern, not gradient BMP")
-    parser.add_argument("--uuid", default="df44848819707c3d")
+    parser.add_argument("--chip", choices=("CH585", "CH32V307"), default=default_chip)
+    parser.add_argument("--uuid")
+    parser.add_argument("--resource", help="Mutex resource; defaults to the board UUID")
     args = parser.parse_args()
-    resource = "CH585-" + args.uuid
+    if args.uuid is None:
+        args.uuid = {"CH585": "df44848819707c3d", "CH32V307": "263e972bf5a4383b"}[args.chip]
+    resource = args.resource or args.chip + "-" + args.uuid
+    flash_address = "0x08000000" if args.chip == "CH32V307" else "0x0"
     mutex = pathlib.Path.home() / ".local/bin/station-mutex"
     subprocess.run([str(mutex), "check", resource], check=True)
     if not args.image.is_file() or not args.fallback.is_file():
@@ -36,7 +41,8 @@ def main():
     report = {"image": str(args.image), "fallback": str(args.fallback),
               "image_sha256": hashlib.sha256(args.image.read_bytes()).hexdigest(),
               "queue": args.queue, "request_bytes": args.request_bytes, "runs": args.runs,
-              "uuid": args.uuid, "pattern": args.pattern, "commands": [], "success": False}
+              "uuid": args.uuid, "chip": args.chip, "resource": resource,
+              "pattern": args.pattern, "commands": [], "success": False}
 
     def command(argv, timeout=90):
         run = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
@@ -49,8 +55,8 @@ def main():
 
     def program(path, suffix):
         readback = args.record.with_suffix(f".{suffix}.readback.bin")
-        command([str(mutex), "protect", "--label", "CH585 flash + readback", resource, "--",
-                 args.minichlink, "-w", str(path), "0x0", "-r", str(readback), "flash",
+        command([str(mutex), "protect", "--label", args.chip + " flash + readback", resource, "--",
+                 args.minichlink, "-w", str(path), flash_address, "-r", str(readback), "flash",
                  str(path.stat().st_size), "-a", "-b"])
         if readback.read_bytes() != path.read_bytes():
             raise ValueError(f"Flash readback mismatch: {path}")
@@ -65,7 +71,7 @@ def main():
     try:
         identity = command([args.minichlink, "-i", "-e"])
         identification = (identity.stdout + identity.stderr).lower().replace("-", "")
-        if "detected ch585" not in identification or args.uuid.lower() not in identification:
+        if "detected " + args.chip.lower() not in identification or args.uuid.lower() not in identification:
             raise ValueError("Unexpected MCU/UUID; refusing to program it")
         attempted = True
         program(args.image, "candidate")

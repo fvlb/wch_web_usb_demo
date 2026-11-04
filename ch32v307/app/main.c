@@ -29,7 +29,6 @@
 #define PROF_TMRTIM     TIM3
 #define PROF_TMRRCC     RCC_APB1Periph_TIM3
 
-static volatile uint32_t prof_idle_us  = 0;  /* time in WFI */
 static volatile uint32_t prof_busy_us  = 0;  /* time awake (ISR + main) */
 volatile uint32_t prof_isr_us   = 0;  /* time in USB ISR only */
 volatile uint32_t prof_isr_cnt  = 0;  /* USB ISR invocation count */
@@ -41,7 +40,7 @@ static void Prof_Init(void)
 {
     TIM_TimeBaseInitTypeDef t = {0};
     RCC_APB1PeriphClockCmd(PROF_TMRRCC, ENABLE);
-    t.TIM_Prescaler = 144 - 1;        /* 144 MHz -> 1 tick/us */
+    t.TIM_Prescaler = SystemCoreClock / 1000000u - 1;
     t.TIM_Period = 0xFFFF;             /* free-running 16-bit (wraps 65.5 ms) */
     t.TIM_ClockDivision = TIM_CKD_DIV1;
     t.TIM_CounterMode = TIM_CounterMode_Up;
@@ -54,19 +53,24 @@ static inline uint32_t Prof_Now(void)
     return PROF_TMRTIM->CNT;  /* 16-bit; deltas are small */
 }
 
-/* diagnostic vendor request 0x0C: returns 5x uint32
- * [0]=idle_us [1]=busy_us [2]=isr_us [3]=isr_count [4]=elapsed_capture */
+/* Diagnostic vendor request 0x0C, 5x uint32:
+ * [0]=EP2 completions [1]=USB IRQs [2]=profiled ISR us [3]=core clock Hz
+ * [4]=timer capture. This candidate replaces the old idle/busy layout. */
 static uint8_t s_profBuf[20];
 const uint8_t *Prof_GetData(void)
 {
-    uint32_t vals[5] = {prof_idle_us, prof_busy_us, prof_isr_us, prof_isr_cnt, Prof_Now()};
+    extern volatile uint32_t g_ep2Count;
+    /* Same first two diagnostic fields as CH585: completion IRQ counts.
+     * Duration is measured only when USBHS_PROFILE_IRQ=1. */
+    uint32_t vals[5] = {g_ep2Count, prof_isr_cnt, prof_isr_us, SystemCoreClock, Prof_Now()};
     memcpy(s_profBuf, vals, 20);
     return s_profBuf;
 }
 
 int main(void)
 {
-    /* SystemInit() ran from startup: 144 MHz HSE PLL */
+    /* SystemInit() ran from startup. Use SystemCoreClock: the current board
+     * configuration selects 96 MHz, not the old comment's assumed 144 MHz. */
 
     USART_Printf_Init(115200);
     UartDma_Init();   /* switch printf to non-blocking DMA TX */
@@ -87,7 +91,6 @@ int main(void)
 
     while (1)
     {
-        uint32_t t_sleep = Prof_Now();
         __asm volatile("nop"); /* WFI disabled for debug */
         uint32_t t_wake  = Prof_Now();    /* includes ISR time */
         uint32_t t_done;

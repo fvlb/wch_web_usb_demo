@@ -106,7 +106,7 @@ const uint8_t MyCfgDescr_FS [] =
     0x05,                           // bDescriptorType (Endpoint)
     0x82,                           // bEndpointAddress: IN endpoint 2
     0x02,                           // bmAttributes: Bulk
-    DEF_USBD_UEP2_SIZE, 0x00,       // wMaxPacketSize
+    0x40, 0x00,                    // FS wMaxPacketSize = 64
     0x00,                           // bInterval: N/A for bulk
 };
 

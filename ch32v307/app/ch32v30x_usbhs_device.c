@@ -50,6 +50,8 @@ extern volatile uint8_t USBD_EP1_TxBusy; /* demo shim (bottom of file) */
 __attribute__ ((aligned(4))) uint8_t USBHS_EP0_Buf[ DEF_USBD_UEP0_SIZE ];
 __attribute__ ((aligned(4))) uint8_t USBHS_EP2_Tx_Buf[ 512 ];
 __attribute__ ((aligned(4))) uint8_t USBHS_EP1_Tx_Buf[ 64 ];
+__attribute__ ((aligned(4))) uint8_t USBHS_EP1_Rx_Buf[ 512 ];
+volatile uint32_t g_ep2Count;
 
 /* MSC-era symbols still referenced by untouched EVT paths; never triggered */
 uint8_t UDisk_Out_Buf[ 512 ];
@@ -147,11 +149,12 @@ void USBHS_Device_Endp_Init ( void )
                           USBHS_UEP2_T_EN | USBHS_UEP1_R_EN;  /* EP1 OUT = trigger */
 
     USBHSD->UEP0_MAX_LEN  = DEF_USBD_UEP0_SIZE;
-    USBHSD->UEP1_MAX_LEN  = DEF_USBD_UEP1_SIZE;
+    USBHSD->UEP1_MAX_LEN  = 512;
     USBHSD->UEP2_MAX_LEN  = DEF_USBD_UEP2_SIZE;
 
     USBHSD->UEP0_DMA    = (uint32_t)(uint8_t *)USBHS_EP0_Buf;
     USBHSD->UEP1_TX_DMA = (uint32_t)(uint8_t *)USBHS_EP1_Tx_Buf;
+    USBHSD->UEP1_RX_DMA = (uint32_t)USBHS_EP1_Rx_Buf;
     USBHSD->UEP2_TX_DMA = (uint32_t)(uint8_t *)USBHS_EP2_Tx_Buf;
 
     USBHSD->UEP0_TX_LEN  = 0;
@@ -162,7 +165,10 @@ void USBHS_Device_Endp_Init ( void )
     USBHSD->UEP1_RX_CTRL = USBHS_UEP_R_RES_ACK;  /* accept triggers */
     USBHSD->UEP2_TX_LEN  = 0;
     USBHSD->UEP2_TX_CTRL = USBHS_UEP_T_RES_NAK;
-    USBHSD->BUF_MODE |= USBHSD_UEP_DOUBLE_BUF( DEF_UEP2 ); /* software toggle */
+    USBHSD->BUF_MODE &= ~USBHSD_UEP_DOUBLE_BUF(DEF_UEP2);
+#if USBHS_EP2_DOUBLE_BUFFER
+    USBHSD->BUF_MODE |= USBHSD_UEP_DOUBLE_BUF(DEF_UEP2);
+#endif
 
     for(uint8_t i=0; i<DEF_UEP_NUM; i++ )
     {
@@ -185,7 +191,10 @@ void USBHS_Device_Init ( FunctionalState sta )
         Delay_Us(10);
         USBHSD->CONTROL &= ~USBHS_UC_RESET_SIE;
         USBHSD->HOST_CTRL = USBHS_UH_PHY_SUSPENDM;
-        USBHSD->CONTROL = USBHS_UC_DMA_EN | USBHS_UC_SPEED_HIGH; /* no INT_BUSY: let IN-complete re-arm without NAK */
+        USBHSD->CONTROL = USBHS_UC_DMA_EN | USBHS_UC_SPEED_HIGH;
+#if USBHS_INT_BUSY_ENABLE
+        USBHSD->CONTROL |= USBHS_UC_INT_BUSY;
+#endif
         USBHSD->INT_EN = USBHS_UIE_SETUP_ACT | USBHS_UIE_TRANSFER | USBHS_UIE_DETECT | USBHS_UIE_SUSPEND;
         USBHS_Device_Endp_Init( );
         USBHSD->CONTROL |= USBHS_UC_DEV_PU_EN;
@@ -326,9 +335,12 @@ void USBHS_IRQHandler( void )
 {
     uint8_t  intflag, intst, errflag;
     uint32_t isrExit;
-    extern volatile uint32_t Prof_Now_wrapper(void);
     #define PROF_TMR3_CNT (*(volatile uint16_t *)0x40000424)  /* TIM3 CNT (16-bit) */
+#if USBHS_PROFILE_IRQ
     g_isrEntryTick = PROF_TMR3_CNT;
+#else
+    (void)isrExit;
+#endif
     uint16_t len;
 
     intflag = USBHSD->INT_FG;
@@ -398,6 +410,7 @@ void USBHS_IRQHandler( void )
 
                     /* end-point 2 data in interrupt */
                     case USBHS_UIS_TOKEN_IN | DEF_UEP2:
+                        g_ep2Count++;
                         USBHSD->UEP2_TX_CTRL = (USBHSD->UEP2_TX_CTRL & ~USBHS_UEP_T_RES_MASK) | USBHS_UEP_T_RES_NAK;
                         USBHSD->UEP2_TX_CTRL ^= USBHS_UEP_T_TOG_DATA1;
                         USBHS_Endp_Busy[ DEF_UEP2 ] &= ~DEF_UEP_BUSY;
@@ -410,38 +423,19 @@ void USBHS_IRQHandler( void )
                 break;
 
             /* data-out stage processing */
-            /* EP1 OUT = trigger: host sends 1 byte, we fill EP2 with
-             * the next packet. This is the echo pattern that achieves
-             * 3.8 MB/s: host write→read avoids xHCI NAK-backoff. */
-            if( ( intst & USBHS_UIS_ENDP_MASK ) == DEF_UEP1 )
-            {
-                /* re-arm EP1 for the next trigger */
-                USBHSD->UEP1_RX_CTRL = (USBHSD->UEP1_RX_CTRL & ~USBHS_UEP_R_RES_MASK) | USBHS_UEP_R_RES_ACK;
-                /* fill EP2 with the next packet (same as echo) */
-                if( s_ep2FillCb != NULL )
-                {
-                    const uint8_t *p = NULL;
-                    uint16_t n = s_ep2FillCb( &p, DEF_USBD_UEP2_SIZE );
-                    if( ( n > 0 ) && ( p != NULL ) )
-                    {
-                        if( ( USBHSD->UEP2_TX_CTRL & USBHS_UEP_T_TOG_DATA1 ) == 0 )
-                        {
-                            USBHSD->UEP2_TX_DMA = (uint32_t)p;
-                        }
-                        else
-                        {
-                            USBHSD->UEP2_RX_DMA = (uint32_t)p;
-                        }
-                        USBHSD->UEP2_TX_LEN = n;
-                        USBHSD->UEP2_TX_CTRL = ( USBHSD->UEP2_TX_CTRL & ~USBHS_UEP_T_RES_MASK ) | USBHS_UEP_T_RES_ACK;
-                    }
-                }
-                USBHSD->INT_FG = USBHS_UIF_TRANSFER;
-                return;
-            }
             case USBHS_UIS_TOKEN_OUT:
                 switch( intst & ( USBHS_UIS_TOKEN_MASK | USBHS_UIS_ENDP_MASK ) )
                 {
+                    case USBHS_UIS_TOKEN_OUT | DEF_UEP1:
+                        if (intst & USBHS_UIS_TOG_OK)
+                        {
+                            USBHSD->UEP1_RX_CTRL ^= USBHS_UEP_R_TOG_DATA1;
+                            USBHSD->UEP1_RX_CTRL = (USBHSD->UEP1_RX_CTRL & ~USBHS_UEP_R_RES_MASK) | USBHS_UEP_R_RES_ACK;
+                            /* Retain compatibility with the old trigger, but
+                             * never consume/overwrite an already active DMA. */
+                            USBD_EP2_StartTransfer();
+                        }
+                        break;
                     /* end-point 0 data out interrupt */
                     case USBHS_UIS_TOKEN_OUT | DEF_UEP0:
                          len = USBHSH->RX_LEN;
@@ -942,8 +936,10 @@ void USBHS_IRQHandler( void )
         USBHSD->INT_FG = intflag;
     }
     /* profiling: measure ISR duration */
+#if USBHS_PROFILE_IRQ
     isrExit = PROF_TMR3_CNT;
     prof_isr_us += (uint16_t)(isrExit - g_isrEntryTick);
+#endif
     prof_isr_cnt++;
 }
 
@@ -986,11 +982,13 @@ void USBD_EP2_StartTransfer( void )
     if( ( USBHS_Endp_Busy[ DEF_UEP2 ] & DEF_UEP_BUSY ) == 0 )
     {
         const uint8_t *p = NULL;
-        uint16_t n = s_ep2FillCb( &p, DEF_USBD_UEP2_SIZE );
+        uint16_t limit = (USBHSD->SPEED_TYPE & USBHS_SPEED_TYPE_MASK) == USBHS_SPEED_HIGH ? DEF_USBD_HS_PACK_SIZE : DEF_USBD_FS_PACK_SIZE;
+        uint16_t n = s_ep2FillCb( &p, limit );
         if( ( n > 0 ) && ( p != NULL ) )
         {
             /* fill the buffer the current toggle selects */
-            if( ( USBHSD->UEP2_TX_CTRL & USBHS_UEP_T_TOG_DATA1 ) == 0 )
+            if( !(USBHSD->BUF_MODE & USBHSD_UEP_DOUBLE_BUF(DEF_UEP2)) ||
+                ( USBHSD->UEP2_TX_CTRL & USBHS_UEP_T_TOG_DATA1 ) == 0 )
             {
                 USBHSD->UEP2_TX_DMA = (uint32_t)p;
             }
@@ -998,12 +996,19 @@ void USBD_EP2_StartTransfer( void )
             {
                 USBHSD->UEP2_RX_DMA = (uint32_t)p;
             }
+            USBHS_Endp_Busy[ DEF_UEP2 ] |= DEF_UEP_BUSY;
+            USBHSD->UEP2_MAX_LEN = limit;
             USBHSD->UEP2_TX_LEN = n;
             USBHSD->UEP2_TX_CTRL = ( USBHSD->UEP2_TX_CTRL & ~USBHS_UEP_T_RES_MASK ) | USBHS_UEP_T_RES_ACK;
-            USBHS_Endp_Busy[ DEF_UEP2 ] |= DEF_UEP_BUSY;
         }
     }
     NVIC_EnableIRQ( USBHS_IRQn );
+}
+
+void USBD_EP2_StopTransfer(void)
+{
+    USBHSD->UEP2_TX_CTRL = (USBHSD->UEP2_TX_CTRL & ~USBHS_UEP_T_RES_MASK) | USBHS_UEP_T_RES_NAK;
+    USBHS_Endp_Busy[DEF_UEP2] &= ~DEF_UEP_BUSY;
 }
 
 void USBD_Device_Init( void ) { USBHS_RCC_Init(); USBHS_Device_Init( ENABLE ); }

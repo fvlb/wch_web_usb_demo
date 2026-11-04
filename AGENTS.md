@@ -1,5 +1,27 @@
 # AI development handoff — WCH USB demo
 
+## Latest pause: CH32V307, 2026-11-04
+
+The user subsequently connected V307 and requested the same improvements, then
+paused and requested saving all work to GitHub. **Read `ch32v307/USBHS_HANDOFF.md`
+first.** The candidate has ~10 MiB BMP / 512-byte payload / ownership / packed
+generation fixes and passes offline tests, but USB enumeration remains blocked;
+there is no verified V307 speedup. The board is currently running the official
+USB-FS diagnostic (expected `1a86:5537`, `CH32V307 USBFS DIAG`), not the candidate.
+
+WCH-Link 3.3 V was enabled on request; target UUID `26-3e-97-2b-f5-a4-38-3b`,
+288 KiB flash, existing 32 KiB RAM link layout. Use probe mutex resource
+`WCH-LINK-F3388F06781D` for this session. The first power-on command needed was
+`minichlink -k3`; normal initialization fails on an unpowered target. Replugging
+the probe may disable that output again. Original and flashed-image backups are
+local/ignored under `ch32v307/backups/`; hashes and evidence are committed.
+
+The optional FS builder `--clock pll` mode is prepared but was not built/flashed;
+the already tested official FS diagnostic still uses the HS PHY PLL clock.
+Do not resume blind flashing or claim a cable fault before checking clocks and
+the actual board connector/jumper schematic. No further hardware experiments
+were requested after the pause. The CH585 notes below describe its prior campaign.
+
 ## Current work and scope
 
 This is the original `fvlb/wch_web_usb_demo` Git repository, not the adjacent

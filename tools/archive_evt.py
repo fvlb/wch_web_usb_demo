@@ -11,8 +11,8 @@ import zipfile
 
 
 def archive(repo, revision, output):
-    if repo not in ("ch585", "ch32v307"):
-        raise ValueError("Only official openwch/ch585 and openwch/ch32v307 are supported")
+    if repo not in ("ch585", "ch32v307", "ch32v20x"):
+        raise ValueError("Only the listed official openwch repositories are supported")
     if len(revision) != 40 or any(c not in "0123456789abcdef" for c in revision):
         raise ValueError("Use a full hexadecimal commit hash")
     destination = output / f"{repo.upper()}_EVT_{revision[:12]}.zip"
@@ -67,7 +67,7 @@ def archive(repo, revision, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("repo", choices=("ch585", "ch32v307"))
+    parser.add_argument("repo", choices=("ch585", "ch32v307", "ch32v20x"))
     parser.add_argument("revision", help="Full upstream Git commit hash")
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()

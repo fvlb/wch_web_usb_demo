@@ -1,6 +1,30 @@
 # CH32V307 investigation paused — 2026-11-04
 
-## Resume here
+## Evening update — supersedes the earlier flashed-state note
+
+The user identified the PCB as **CH32V307V-R2-1v1** and switched its power lead
+to WCH-Link 3.3 V. On request, the **HS candidate** was subsequently flashed and
+readback verified: `ch32v307/_build/safe512/app.bin`, 16192 bytes, SHA256
+`d33689e2627ca20de818e6c22fbf32f8a7886d61f5b6632f3519237c1c00419e`.
+Target UUID again matched `26-3e-97-2b-f5-a4-38-3b` (same MCU as the afternoon).
+**Current state: HS firmware running, 3.3 V enabled, 5 V disabled.** Expected
+device is now `1209:0001` on **HS**, not the earlier FS diagnostic PID.
+It did not enumerate immediately after this flash. Readback is saved locally as
+`ch32v307/_build/usbhs-session/evening-hs.readback.bin`.
+
+The laptop USB-C port was observed as `device` / `sink`, receiving 5 V. Disabling
+WCH-Link 5 V removed that Type-C partner and changed incoming voltage to zero.
+This confirms the power direction, but exact cable/host-role routing remains to
+be corrected; a sound alone is not USB enumeration. The R2 manual identifies
+P9=FS, P11=HS and S2=power switch; it lists no USB data-routing jumper.
+
+Historical successful V307 commits on 2026-08-30 record HS enumeration and file
+verification, but do not record the PCB revision or MCU UUID. USB serial
+`CH32V307-DEMO-0001` is hardcoded and cannot prove physical board identity.
+The older scaffold's flash CS was PA2, not PE6; current demos do not initialize
+the user's R2-specific PE6/PC6/PC13/PC14 peripheral idle/reset levels.
+
+## Earlier pause snapshot
 
 The user paused the task and requested saving all work to GitHub. **No V307
 throughput improvement has been measured.** Neither the original HS firmware,

@@ -154,7 +154,9 @@ static int run(libusb_context *context, struct bench *b, unsigned iteration)
     memcpy(b->image, first, (unsigned)received); b->used = (unsigned)received;
     for (unsigned i = 0; i < b->depth; i++)
         if (submit(b->slots + i)) { b->failed = 1; break; }
-    while (b->active && !b->stopping && !b->failed && !interrupted && now() - start < 30) {
+    /* A 10 MiB file on a full-speed MCU can legitimately take over 30 s. */
+    double deadline_seconds = 30 + b->size / 200000.0;
+    while (b->active && !b->stopping && !b->failed && !interrupted && now() - start < deadline_seconds) {
         struct timeval wait = {0, 100000};
         rc = libusb_handle_events_timeout_completed(context, &wait, NULL);
         if (rc && rc != LIBUSB_ERROR_INTERRUPTED) { b->failed = 1; break; }

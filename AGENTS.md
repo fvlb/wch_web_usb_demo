@@ -1,6 +1,34 @@
 # AI development handoff — WCH USB demo
 
-## Latest pause: CH32V307, 2026-11-04
+## Active CH32V208WB bring-up — 2026-11-05
+
+The user switched to **CH32F&V208W-R0-1v4**, target CH32V208 UUID
+`a7-d8-5b-e7-57-d3-54-14`. **Read `ch32v208wb/README.md`.** J1 is USBFS PB6/PB7,
+not USBD PA11/PA12. UART PA9/PA10 RX/TX are verified; LEDs are PD2/PD3.
+The demo now enumerates at **12M** as 1209:0001 and passed **seven full files across
+three flashes**, 10484790-byte gradients at **0.896 MB/s**, plus controls before/after.
+Keep WCH-Link 3.3 V on and 5 V off for the current wiring; probe resource is
+`WCH-LINK-F3388F06781D`. Both original 160 KiB and mapped 480 KiB flash backups
+are local under `ch32v208wb/backups/`, with hashes in its README.
+
+Match EVT initialization order: enable USBFS DMA/controller before endpoint
+DMA configuration. Handle SETUP directly as EP0, matching EVT: its status endpoint
+bits can be nonzero; filtering them blocked enumeration and controls after bulk IN.
+Both details matter; the init-order change alone did not establish reliability.
+J1 CC pull-downs R18/R19 are NC in PCB data; A-host-to-C cable was used successfully.
+The user explicitly requested **periodic commits/pushes at tested checkpoints**.
+
+## Current V307 state — evening update, 2026-11-04
+
+The user resumed checking USB, identified PCB **CH32V307V-R2-1v1**, connected
+WCH-Link 3.3 V and requested HS firmware. The **HS safe512 candidate is now
+flashed, readback verified and booted**, replacing the earlier FS diagnostic.
+UUID still matches `26-3e-97-2b-f5-a4-38-3b`. **3.3 V is enabled; 5 V is off.**
+Expected target is `1209:0001` on **HS**, but enumeration remains unresolved.
+See the evening update in `ch32v307/USBHS_HANDOFF.md` for cable/power-role evidence
+and historical board-identity limitations. The earlier snapshot below is history.
+
+## Earlier pause: CH32V307, 2026-11-04
 
 The user subsequently connected V307 and requested the same improvements, then
 paused and requested saving all work to GitHub. **Read `ch32v307/USBHS_HANDOFF.md`

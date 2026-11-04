@@ -222,4 +222,5 @@ obj
 _build
 ch585m/backups/*.bin
 ch32v307/backups/*.bin
+ch32v208wb/backups/*.bin
 __pycache__/

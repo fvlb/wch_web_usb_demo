@@ -14,16 +14,19 @@ single web page can drive any board:
   byte-verified gradient download; default BMP is **~10 MiB**.
 - [`ch32v307/`](ch32v307) — WCH CH32V307 (QingKe V4F). USBHS high-speed,
   zero-copy rows, DMA UART TX, CPU profiling (vendor 0x0C). LED pin TBD.
+- [`ch32v208wb/`](ch32v208wb) — CH32F&V208W-R0-1v4, CH32V208WB.
+  USBFS on **J1 PB6/PB7**, UART PA9/PA10, LED1 PD2 / heartbeat PD3.
+  **0.896 MB/s** byte-verified ~10 MiB gradients; seven files across three flashes.
 
-Both devices:
+Common device protocol:
 
 - Advertise a BOS descriptor with **Microsoft OS 2.0** (Windows
   auto-binds `winusb.sys`, no `.inf` file) and **WebUSB** (browser
   `GET_URL` landing-page) Platform Capabilities side by side.
-- Expose LED brightness control (`SET_LED`/`GET_LED`), a debounced
-  push-button reported over an EP1 interrupt IN endpoint, and a synthetic
-  BMP file streamed over EP2 bulk IN for throughput testing (~10 MiB on
-  CH585M, ~3 MiB on the other variants; query vendor request 0x09).
+- Expose LED brightness control (`SET_LED`/`GET_LED`) and a synthetic BMP
+  streamed over EP2 bulk IN (~10 MiB on CH585M and V208; query request 0x09).
+  Boards with a wired button also report it over EP1 interrupt IN; V208
+  reserves EP1 and reports released because no button pin was specified.
 - Use VID/PID **0x1209 / 0x0001** (the open ["pid.codes" test
   allocation](https://pid.codes/1209/0001/)).
 
@@ -32,6 +35,7 @@ table, and build/flash instructions:
 
 - [`ch32l103/README.md`](ch32l103/README.md)
 - [`ch592f/README.md`](ch592f/README.md)
+- [`ch32v208wb/README.md`](ch32v208wb/README.md)
 
 ## CH585M: verified USBHS improvement, 2026-11-04
 

@@ -20,19 +20,28 @@ def main(default_chip="CH585"):
     parser.add_argument("--fallback", type=pathlib.Path, required=True)
     parser.add_argument("--record", type=pathlib.Path, required=True)
     parser.add_argument("--minichlink", required=True)
-    parser.add_argument("--bench", required=True)
+    parser.add_argument("--bench")
+    parser.add_argument("--flash-only", action="store_true", help="Verify programming only; no USB success claim")
+    parser.add_argument("--settle-seconds", type=float, help="Post-boot wait (V208: 12 s; others: 1 s)")
     parser.add_argument("--queue", type=int, default=16)
     parser.add_argument("--request-bytes", type=int, default=65536)
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--pattern", action="store_true", help="Diagnostic static pattern, not gradient BMP")
-    parser.add_argument("--chip", choices=("CH585", "CH32V307"), default=default_chip)
+    parser.add_argument("--chip", choices=("CH585", "CH32V307", "CH32V208"), default=default_chip)
     parser.add_argument("--uuid")
     parser.add_argument("--resource", help="Mutex resource; defaults to the board UUID")
     args = parser.parse_args()
     if args.uuid is None:
-        args.uuid = {"CH585": "df44848819707c3d", "CH32V307": "263e972bf5a4383b"}[args.chip]
+        args.uuid = {"CH585": "df44848819707c3d", "CH32V307": "263e972bf5a4383b",
+                     "CH32V208": "a7d85be757d35414"}[args.chip]
     resource = args.resource or args.chip + "-" + args.uuid
-    flash_address = "0x08000000" if args.chip == "CH32V307" else "0x0"
+    flash_address = "0x0" if args.chip == "CH585" else "0x08000000"
+    if args.settle_seconds is None:
+        args.settle_seconds = 12 if args.chip == "CH32V208" else 1
+    if not 0 <= args.settle_seconds <= 120:
+        parser.error("--settle-seconds must be between 0 and 120")
+    if not args.flash_only and not args.bench:
+        parser.error("--bench is required unless --flash-only is selected")
     mutex = pathlib.Path.home() / ".local/bin/station-mutex"
     subprocess.run([str(mutex), "check", resource], check=True)
     if not args.image.is_file() or not args.fallback.is_file():
@@ -42,6 +51,8 @@ def main(default_chip="CH585"):
               "image_sha256": hashlib.sha256(args.image.read_bytes()).hexdigest(),
               "queue": args.queue, "request_bytes": args.request_bytes, "runs": args.runs,
               "uuid": args.uuid, "chip": args.chip, "resource": resource,
+              "test_kind": "flash-only" if args.flash_only else "USB benchmark",
+              "settle_seconds": args.settle_seconds,
               "pattern": args.pattern, "commands": [], "success": False}
 
     def command(argv, timeout=90):
@@ -60,7 +71,7 @@ def main(default_chip="CH585"):
                  str(path.stat().st_size), "-a", "-b"])
         if readback.read_bytes() != path.read_bytes():
             raise ValueError(f"Flash readback mismatch: {path}")
-        time.sleep(1)
+        time.sleep(args.settle_seconds)
 
     def terminated(signum, frame):
         del signum, frame
@@ -75,10 +86,11 @@ def main(default_chip="CH585"):
             raise ValueError("Unexpected MCU/UUID; refusing to program it")
         attempted = True
         program(args.image, "candidate")
-        bench = [args.bench, str(args.queue), str(args.request_bytes), str(args.runs)]
-        if args.pattern:
-            bench.append("pattern")
-        command(bench, timeout=120)
+        if not args.flash_only:
+            bench = [args.bench, str(args.queue), str(args.request_bytes), str(args.runs)]
+            if args.pattern:
+                bench.append("pattern")
+            command(bench, timeout=240 if args.chip == "CH32V208" else 120)
         report["success"] = True
     except (Exception, KeyboardInterrupt) as error:
         report["error"] = str(error)

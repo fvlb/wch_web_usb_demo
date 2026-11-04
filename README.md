@@ -10,7 +10,8 @@ single web page can drive any board:
   remapped), button on PB22 (BOOT pin). Zero-copy DMA, interrupt-driven
   UART TX, CPU profiling (vendor 0x0C).
 - [`ch585m/`](ch585m) — WCH CH585M. LED on PA9 (TMR0 hardware PWM),
-  UART on PA14. USBHS high-speed, zero-copy rows.
+  UART on PA14. USBHS burst DMA, packed SRAM row generation, **~26 MB/s**
+  byte-verified gradient download; default BMP is **~10 MiB**.
 - [`ch32v307/`](ch32v307) — WCH CH32V307 (QingKe V4F). USBHS high-speed,
   zero-copy rows, DMA UART TX, CPU profiling (vendor 0x0C). LED pin TBD.
 
@@ -21,7 +22,8 @@ Both devices:
   `GET_URL` landing-page) Platform Capabilities side by side.
 - Expose LED brightness control (`SET_LED`/`GET_LED`), a debounced
   push-button reported over an EP1 interrupt IN endpoint, and a synthetic
-  ~3 MB BMP file streamed over EP2 bulk IN for throughput testing.
+  BMP file streamed over EP2 bulk IN for throughput testing (~10 MiB on
+  CH585M, ~3 MiB on the other variants; query vendor request 0x09).
 - Use VID/PID **0x1209 / 0x0001** (the open ["pid.codes" test
   allocation](https://pid.codes/1209/0001/)).
 
@@ -31,10 +33,35 @@ table, and build/flash instructions:
 - [`ch32l103/README.md`](ch32l103/README.md)
 - [`ch592f/README.md`](ch592f/README.md)
 
-## Measured throughput (all with the same test harness)
+## CH585M: verified USBHS improvement, 2026-11-04
 
-All numbers measured on the same Linux/xHCI host, downloading the same
-synthetic 3 MB gradient BMP over EP2 bulk IN, byte-verified:
+The connected board was identified through WCH-Link and confirmed at **480M**
+on its HS port. The original firmware actually submitted **64-byte short
+packets** despite advertising a 512-byte HS bulk endpoint. After correcting
+that mismatch, producer/DMA ownership, burst mode and SRAM generation:
+
+| Workload | Verified throughput | Verification |
+|---|---:|---|
+| Original 3 MiB gradient, one 512-byte host read pending | 1.23–1.24 MB/s | 2 full files |
+| Optimized 3 MiB gradient, 64 KiB host reads | 25.28–26.98 MB/s | 100 full files |
+| **Current 10 MiB gradient**, 64 KiB host reads | **25.62–26.80 MB/s** | **30 full files** |
+| Precomputed diagnostic pattern, burst DMA | 43.17–43.38 MB/s | 10 full files across 2 burst sizes |
+
+The static-pattern result isolates USB transport; it is not gradient generation
+speed. The default remains the original gradient, now **1024×3413 pixels,
+10,484,790 bytes**. Use large host reads; a serial stream of 512-byte host reads
+still adds substantial scheduling overhead. Details, register references,
+failed experiments and build commands: [CH585 USBHS report](ch585m/USBHS_REPORT.md).
+
+```sh
+make -C tools check
+ch585m/_build/tools/bmp-bench 16 65536 3
+```
+
+## Historical measurements (earlier shared harness)
+
+The earlier figures below used the same Linux/xHCI host and synthetic 3 MiB
+gradient BMP. The CH585M row is historical, superseded by the measurements above:
 
 | Board    | USB         | Architecture                  | Throughput | ISR/packet | CPU in ISR |
 |----------|-------------|-------------------------------|-----------:|-----------:|-----------:|
@@ -48,10 +75,10 @@ Notes:
 - Full-speed theoretical max: ~1.2 MB/s (19 × 64-byte transactions/frame).
   The CH592F at 287 KB/s reaches ~24% of this (limited by xHCI NAK-backoff
   with INT_BUSY; removing INT_BUSY doubles speed but corrupts data).
-- High-speed theoretical max: ~53 MB/s. The ~1 MB/s ceiling on CH585M/
-  CH32V307 is the per-packet interrupt round-trip (single-buffered endpoint,
-  ~2000 packets/s × 512 bytes). Double-buffer mode would break this but
-  requires a different arming protocol than the reference manual documents.
+- High-speed theoretical max: ~53.25 MB/s. The former attribution of the CH585M
+  ~1 MB/s result solely to a 512-byte-per-IRQ limit was incorrect: it was sending
+  64-byte short packets and also had producer/ownership and flash execution
+  bottlenecks. The CH32V307 has not been remeasured in this campaign.
 - CPU in ISR measured via TMR3/TIM3 at 1 µs resolution (vendor request 0x0C
   on CH592F and CH32V307).
 - The zero-copy DMA on CH592F uses the same ring buffer as the stock code

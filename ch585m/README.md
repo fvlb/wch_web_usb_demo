@@ -1,55 +1,89 @@
-# CH585M WinUSB / WebUSB LED demo (throughput-comparison port)
+# CH585M WinUSB / WebUSB LED + USBHS file transfer
 
-CH585M port of [`../ch592f`](../ch592f) (and the CH32L103 sibling): the
-**same USB descriptors (VID/PID 0x1209:0x0001), the same vendor protocol
-(SET_LED / GET_LED / GET_VERSION / GET_MILLIS / EP1 button events / EP2
-synthetic 3 MB BMP bulk download) and the same ring-buffered bulk path**,
-running on the CH585's USB2 full-speed device peripheral - so host-side
-throughput numbers are directly comparable across the three boards.
+Original vendor protocol and LED/button functions, with a generated 24-bit BMP
+stream on EP2 bulk IN. The current image is **1024×3413 pixels, 10,484,790 bytes**
+(approximately 10 MiB). Query vendor request **0x09** for its size; **0x0A** starts
+or restarts a transfer. The first short packet is the 54-byte BMP header.
 
-Differences from the CH592F original:
+## Connected board and results
 
-- USB device peripheral: CH585 USB2 (register-compatible with the CH59x
-  USBD; endpoint DMA registers are 32-bit here, and the USB pin enable
-  lives in `R16_PIN_CONFIG` (`RB_PIN_USB_EN | RB_UDP_PU_EN`) instead of
-  `R16_PIN_ANALOG_IE`).
-- LED on **PB23** via the TMR0 hardware PWM channel (`RB_PIN_TMR0`
-  alternate mapping, same as on the CH592F): real 8-bit brightness,
-  ~58.6 kHz carrier. Heartbeat blink until the first host `SET_LED`.
-- Button on **PB22** (input with pull-up, unpopulated on this board so
-  far - the EP1 interrupt-in path stays idle).
-- Debug UART: **UART0, TX on PB7, RX on PB4**, 115200.
-- Scheduler (`shed.[ch]`) and millisecond time base (`systick.[ch]`,
-  TMR2-backed) ported unchanged from the CH592F project.
+Use the **HS** connector for this firmware, not FS. The tested board enumerates
+as `1209:0001` at **480 Mb/s**. WCH-Link itself enumerates separately at 12 Mb/s;
+that does not indicate the MCU's USB data speed.
 
-## Measured throughput (same host, same harness)
+Measured on the demoboard, 2026-11-04:
 
-| Configuration (CH585M unless noted)          | Sustained EP2 bulk-IN | Data check |
-|-----------------------------------------------|-----------------------|------------|
-| CH592F full-speed, memcpy ring (reference)    | ~230 KB/s             | byte-exact |
-| USBHS high-speed, memcpy ring + per-byte BMP generator | ~256 KB/s    | byte-exact |
-| USBHS + 64 KB pre-generated repeating block (generator bypass experiment, pre in-flight guard) | ~534 KB/s | block check FAILED (arm race) |
-| USBHS + zero-copy DMA, 62.4 MHz system clock | ~327 KB/s | byte-exact |
-| USBHS + zero-copy DMA, 78 MHz system clock | ~330 KB/s | byte-exact (gradient) |
-| USBHS + checkerboard into ring slots (one memcpy per packet) | ~935 KB/s | pattern-verified |
-| USBHS + fully zero-copy (no ring; packets are pointers into the two static rows) | ~1029 KB/s | pattern-verified |
+- Current 10 MiB gradient: **25.62–26.80 MB/s**, all **30** complete files verified.
+- Earlier 3 MiB version: **25.28–26.98 MB/s**, all **100** complete files verified.
+- Diagnostic precomputed pattern: **43.17–43.38 MB/s**, verified; not the default.
+- Original code, 64-byte short packets, one host read pending: **1.23–1.24 MB/s**.
 
-The 62.4 -> 78 MHz jump (+25% CPU) moved throughput by ~1%: the cap is
-the per-packet interrupt round-trip, not clock or generator speed.
+Full experiment matrix, failures, datasheet bits and memory costs are in
+[`USBHS_REPORT.md`](USBHS_REPORT.md).
 
-Notes: the ~256-327 KB/s figures are generator-limited, not bus-limited -
-the 534 KB/s experiment (since reverted) proved the per-byte BMP walk was
-the cap. Next step toward real USBHS numbers: combine zero-copy DMA with
-the pre-generated block (serving straight from the static 64 KB buffer)
-and chain packets inside the IN-complete handler with no NAK gap.
+## Build
 
-## Build & flash
+Use genuine **WCH GCC15**, not generic xPack GCC15 (it does not support `xw`).
+From the repository root:
 
 ```sh
-export PATH="/opt/wch/RISC-V_Embedded_GCC15/bin:$PATH"
-make -j16                                        # -> _build/app.bin
-minichlink -w _build/app.bin 0x0 && minichlink -a && minichlink -b
+export PATH="/path/to/RISC-V Embedded GCC15/bin:$PATH"
+make -C ch585m -j8 BUILD_DIR=_build/current
+make -C tools check
 ```
 
-The previous life of this directory (the EVT USBHS mass-storage demo it
-was scaffolded from) is preserved in git history.
+Outputs: `ch585m/_build/current/app.{elf,bin,hex,map}`. The already tested 10 MiB
+image from this campaign is at `ch585m/_build/final10m/app.{bin,hex}`.
+
+Default build settings select the highest verified gradient-throughput profile:
+
+| Setting | Default |
+|---|---:|
+| `USBHS_EP2_BURST_BYTES` | 65024 |
+| `USBHS_EP2_PAYLOAD_LIMIT` | 512 |
+| `FILEXFER_ROW_BUF_CNT` | 32 |
+| `FILEXFER_RAM_GENERATOR` | 1 |
+| `FILEXFER_PACKED_GENERATOR` | 1 |
+| `FILEXFER_STATIC_PATTERN` | 0 |
+| `OPT` | `-O3 -Wextra` |
+
+The 10 MiB build uses **111980 / 131072 bytes SRAM** and **11624 bytes flash**.
+For less SRAM, use 8 rows and a 16384-byte burst; that configuration measured
+about 24.2 MB/s with the earlier 3 MiB file and used about 35 KiB SRAM.
+
+Use a fresh `BUILD_DIR` when changing compiler flags; the legacy Make rules do
+not track flag changes as dependencies. `make clean` deletes the selected
+build directory. Original/known-good firmware backups live outside `_build`.
+
+## Test
+
+```sh
+# Linux dependencies: build-essential, pkg-config, libusb-1.0-0-dev, Python 3
+make -C tools
+ch585m/_build/tools/bmp-bench 16 65536 3
+```
+
+The host submits asynchronous reads, reconstructs stream order, and checks every
+gradient byte. Its JSON reports decimal MB/s and actual host completion lengths.
+Verification happens after transfer timing. Kernel/library versions and USB
+topology are recorded in the report. Run physical access under the shared mutex
+as shown in `AGENTS.md`; the simple invocation above illustrates tool arguments.
+
+Browser/native clients should request **64 KiB** chunks, query the file length,
+continue after the initial 54-byte short header, and request only the remaining
+bytes for the final read. Sending one host request per USB packet can limit
+throughput even with fast firmware. The externally hosted page is a separate repo.
+
+For deliberate 128-/256-byte payload diagnostics, disable burst mode and set
+`USBHS_EP2_PAYLOAD_LIMIT`; keep the HS endpoint descriptor MPS at 512.
+
+## Flash and recovery
+
+The user's working programmer is `minichlink` from `ch32fun`, with WCH-LinkE 2.20.
+The experiment runner checks the chip UUID, programs, reads back and compares the
+binary, boots, runs the benchmark, and restores a supplied known-good binary if
+the trial fails. See `AGENTS.md` for the complete command.
+
+Preserve `backups/original-flash-2026-11-04.bin` (448 KiB) and
+`backups/verified-usbhs-10m-2026-11-04.bin` (tested fast image); binaries are ignored.
+Do not erase/change option bytes or bootloader settings for throughput work.

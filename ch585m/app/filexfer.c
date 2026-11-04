@@ -1,23 +1,15 @@
 /********************************** (C) COPYRIGHT *******************************
  * File Name          : filexfer.c
  * Description        : Synthetic BMP file generator, streamed over EP2
- *                       bulk IN for USB throughput testing. Identical
- *                       logic to ../../ch32l103/User/filexfer.c, adapted
- *                       to the CH592F's USBD_EP2_* driver API.
+ *                       bulk IN for CH585 USBHS throughput testing.
  *
- *  Nothing is stored in flash for the pixel data itself: only two small
- *  lookup tables (blue-by-column, green-by-row) are precomputed once at
- *  init, and per-byte pixel-walk state (row/col/channel) is advanced
- *  incrementally - no division/modulo anywhere in steady-state operation.
+ *  No full frame is stored. Lookup tables and optional packed blue lanes
+ *  are precomputed at init.
+ *  A producer prepares aligned RGB rows while USB DMA transmits ready data.
  *
- *  Producer/consumer ring buffer: packet generation is done by
- *  FileXfer_Pump(), called repeatedly from the idle main loop, which fills
- *  a ring of pre-built 64-byte packets ahead of time. The USB interrupt
- *  handler's fill callback then just memcpy()s the next ready packet -
- *  minimal work in interrupt context. If the ring ever runs dry (e.g.
- *  right after FileXfer_Start(), before the main loop has had a chance to
- *  pump), the callback falls back to generating that one packet
- *  synchronously - correctness is preserved either way, only speed differs.
+ *  FileXfer_Pump() generates rows in main context and publishes each only
+ *  after all stores complete. The ISR supplies pointers to ready contiguous
+ *  data, or NAKs until ready. Rows remain USB-owned until DMA completion.
  *
  *  BMP layout (24-bit uncompressed, BITMAPINFOHEADER, 54-byte header):
  *  rows are stored bottom-to-top, each row BGR8:8:8, row size already a
@@ -26,6 +18,14 @@
 #include "filexfer.h"
 #include "ch585_usbhs_device.h"
 #include <string.h>
+
+#ifndef FILEXFER_STATIC_PATTERN
+#define FILEXFER_STATIC_PATTERN 0
+#endif
+#if FILEXFER_STATIC_PATTERN
+#define STATIC_PATTERN_BYTES 32768u
+static uint8_t s_staticPattern[STATIC_PATTERN_BYTES] __attribute__((aligned(4)));
+#endif
 
 
 /* Set by the USB ISR when it had to NAK because the ring ran dry; the
@@ -38,36 +38,85 @@ static volatile uint8_t s_needArm = 0;
 
 /* Set by the USB ISR (START_FILE_XFER, EP0 SETUP context) to request a
  * restart; the main-loop pump performs the state reset + prefill + arm,
- * keeping all generator/ring state single-threaded in main context. */
+ * keeping row generation in main context. */
 static volatile uint8_t s_startReq = 0;
 
 
-/* True while a download should be streaming (set on START_FILE_XFER,
- * cleared once the last byte has left the ring). Lets the pump's
- * self-heal path distinguish "idle" from "stalled". */
+/* True until the final DMA completion has been accounted for. */
 static volatile uint8_t s_active = 0;
 
-/* Pixel-walk generation position. Owned exclusively by FileXfer_Pump()
- * (main-loop context): the ISR never generates, so no locking needed. */
-static uint32_t s_genPos;
-static uint32_t s_col;         /* 0 .. FILEXFER_IMG_WIDTH-1 */
-static uint32_t s_channel;     /* 0=Blue, 1=Green, 2=Red    */
-static uint32_t s_actualRow;   /* counts down from HEIGHT-1 */
+/* Completed (not merely queued) bytes, published by the USB completion path. */
+static volatile uint32_t s_genPos;
 
-/* Colorful gradient with zero-copy serving: four rotating row buffers;
+/* Colorful gradient with zero-copy serving: rotating row buffers;
  * the pump generates rows a few ahead of the send position (cheap LUT
  * walk per row) while the endpoint DMA reads finished rows directly. */
 #define ROW_BYTES   (FILEXFER_IMG_WIDTH * 3u)
-#define ROW_BUF_CNT 4u
-static uint8_t s_rows[ROW_BUF_CNT][ROW_BYTES];
+#ifndef FILEXFER_ROW_BUF_CNT
+#define FILEXFER_ROW_BUF_CNT 4u
+#endif
+#define ROW_BUF_CNT FILEXFER_ROW_BUF_CNT
+#if ROW_BUF_CNT < 2 || ROW_BUF_CNT > 32
+#error "FILEXFER_ROW_BUF_CNT must be between 2 and 32"
+#endif
+typedef union
+{
+    uint8_t bytes[ROW_BYTES];
+    uint32_t words[ROW_BYTES / 4u];
+} FileRow;
+#if !FILEXFER_STATIC_PATTERN
+static FileRow s_rows[ROW_BUF_CNT] __attribute__((aligned(4)));
 static uint8_t s_blueByCol[FILEXFER_IMG_WIDTH];
 static uint8_t s_greenByRow[FILEXFER_IMG_HEIGHT];
-static uint32_t s_genRow = 0;   /* rows fully generated: 0..HEIGHT */
+#endif
+static volatile uint32_t s_genRow = 0;   /* fully generated, published to ISR */
+/* Returned DMA data remains owned by USB until the next completion callback. */
+static uint16_t s_pendingLen;
 
-static void GenerateRow(uint32_t rowFromTop)
+#ifndef FILEXFER_RAM_GENERATOR
+#define FILEXFER_RAM_GENERATOR 0
+#endif
+#if FILEXFER_RAM_GENERATOR
+#define FILEXFER_HOT __HIGH_CODE
+#else
+#define FILEXFER_HOT
+#endif
+
+#ifndef FILEXFER_PACKED_GENERATOR
+#define FILEXFER_PACKED_GENERATOR 0
+#endif
+#if FILEXFER_PACKED_GENERATOR && !FILEXFER_STATIC_PATTERN
+#if (FILEXFER_IMG_WIDTH % 4) != 0
+#error "Packed RGB generation needs a width divisible by four"
+#endif
+/* Four RGB pixels occupy exactly three aligned words. Their blue lanes never
+ * change across rows; green lanes are broadcast and red lanes shift per row. */
+static uint32_t s_blueWords[ROW_BYTES / 4u];
+#endif
+
+#if !FILEXFER_STATIC_PATTERN
+static FILEXFER_HOT void GenerateRow(uint32_t rowFromTop)
 {
-    uint8_t *dst = s_rows[rowFromTop % ROW_BUF_CNT];
     uint8_t green = s_greenByRow[FILEXFER_IMG_HEIGHT - 1u - rowFromTop];
+#if FILEXFER_PACKED_GENERATOR
+    uint32_t *dst = s_rows[rowFromTop % ROW_BUF_CNT].words;
+    const uint32_t *blue = s_blueWords;
+    uint32_t g0 = (uint32_t)green << 8;
+    uint32_t g1 = (uint32_t)green | ((uint32_t)green << 24);
+    uint32_t g2 = (uint32_t)green << 16;
+    uint8_t red = (uint8_t)(FILEXFER_IMG_HEIGHT - 1u - rowFromTop);
+    for (uint32_t col = 0; col < FILEXFER_IMG_WIDTH; col += 4)
+    {
+        dst[0] = blue[0] | g0 | ((uint32_t)red << 16);
+        dst[1] = blue[1] | g1 | ((uint32_t)(uint8_t)(red + 1) << 8);
+        dst[2] = blue[2] | g2 | (uint32_t)(uint8_t)(red + 2) |
+                 ((uint32_t)(uint8_t)(red + 3) << 24);
+        dst += 3;
+        blue += 3;
+        red = (uint8_t)(red + 4);
+    }
+#else
+    uint8_t *dst = s_rows[rowFromTop % ROW_BUF_CNT].bytes;
     uint32_t col;
     for (col = 0; col < FILEXFER_IMG_WIDTH; col++)
     {
@@ -75,8 +124,10 @@ static void GenerateRow(uint32_t rowFromTop)
         *dst++ = green;
         *dst++ = (uint8_t)(col + (FILEXFER_IMG_HEIGHT - 1u - rowFromTop));
     }
+#endif
 }
-static uint8_t s_header[FILEXFER_BMP_HEADER_LEN];
+#endif
+static uint8_t s_header[FILEXFER_BMP_HEADER_LEN] __attribute__((aligned(4)));
 
 /* Builds the 54-byte BMP header into 'hdr'. */
 static void BuildBmpHeader(uint8_t *hdr)
@@ -111,26 +162,6 @@ static void BuildBmpHeader(uint8_t *hdr)
     hdr[50] = 0; hdr[51] = 0; hdr[52] = 0; hdr[53] = 0; /* important colors */
 }
 
-/* Advances the incremental pixel-walk state by exactly one byte. */
-static inline void AdvancePixelState(void)
-{
-    s_channel++;
-    if (s_channel >= 3u)
-    {
-        s_channel = 0;
-        s_col++;
-        if (s_col >= FILEXFER_IMG_WIDTH)
-        {
-            s_col = 0;
-            s_actualRow--;
-        }
-    }
-}
-
-/* Generates up to 'maxlen' bytes starting at the current s_genPos into
- * 'buf', advancing s_genPos and the pixel-walk state accordingly.
- * Returns the number of bytes written (0 only if s_genPos was already
- * at end-of-file when called). */
 /* Called from the idle main loop: fills the ring buffer with as many
  * freshly-generated packets as there is room for, then re-arms EP2 if the
  * ISR previously had to NAK on an empty ring. Cheap to call often - it's
@@ -141,24 +172,33 @@ void FileXfer_Pump(void)
     {
         s_startReq = 0;
         s_genPos = 0;
+        s_pendingLen = 0;
         s_genRow = 0;
         s_active = 1;
+#if !FILEXFER_STATIC_PATTERN
         while ((s_genRow < ROW_BUF_CNT - 1u) && (s_genRow < FILEXFER_IMG_HEIGHT))
         {
-            GenerateRow(s_genRow++);
+            GenerateRow(s_genRow);
+            __asm volatile("" ::: "memory");
+            s_genRow++;
         }
+#endif
         s_needArm = 1;
     }
 
     /* keep generating rows ahead of the send position */
+#if !FILEXFER_STATIC_PATTERN
     if (s_active && (s_genPos > FILEXFER_BMP_HEADER_LEN))
     {
         uint32_t sendRow = (s_genPos - FILEXFER_BMP_HEADER_LEN) / ROW_BYTES;
         while ((s_genRow < sendRow + ROW_BUF_CNT - 1u) && (s_genRow < FILEXFER_IMG_HEIGHT))
         {
-            GenerateRow(s_genRow++);
+            GenerateRow(s_genRow);
+            __asm volatile("" ::: "memory");
+            s_genRow++;
         }
     }
+#endif
 
     if (s_active && (s_genPos >= FILEXFER_TOTAL_SIZE))
     {
@@ -170,30 +210,19 @@ void FileXfer_Pump(void)
         s_needArm = 0;
         USBD_EP2_StartTransfer();
     }
-    else if (s_active)
-    {
-        static uint32_t s_stuck = 0;
-        static uint32_t s_lastPos = 0;
-        if (s_genPos != s_lastPos)
-        {
-            s_lastPos = s_genPos;
-            s_stuck = 0;
-        }
-        else if (++s_stuck >= 100000u)
-        {
-            s_stuck = 0;
-            R8_U2EP2_TX_CTRL ^= 0x40; /* data-toggle resync, see shim notes */
-        }
-    }
 }
 
-/* USB-interrupt-context callback: pops the next ready packet from the
- * ring (fast memcpy only). If the ring is dry it returns 0, which NAKs
+/* USB-interrupt-context callback: returns a zero-copy ready span.
+ * If the ring is dry it returns 0, which NAKs
  * the endpoint - the host retries while the main-loop pump refills and
  * re-arms from FileXfer_Pump(). No generation happens here (see
  * s_needArm). */
 static uint16_t FileXfer_FillCallback(const uint8_t **pptr, uint16_t maxlen)
 {
+    /* The driver invokes us only while idle / after IN completion. Advancing
+     * on completion, not submission, keeps the producer off in-flight rows. */
+    s_genPos += s_pendingLen;
+    s_pendingLen = 0;
     uint32_t pos = s_genPos;
     uint32_t remain = FILEXFER_TOTAL_SIZE - pos;
 
@@ -209,17 +238,45 @@ static uint16_t FileXfer_FillCallback(const uint8_t **pptr, uint16_t maxlen)
          * later packet is 512-aligned inside a 3072-byte row */
         uint16_t n = (maxlen < FILEXFER_BMP_HEADER_LEN) ? maxlen : (uint16_t)FILEXFER_BMP_HEADER_LEN;
         *pptr = s_header;
-        s_genPos += n;
+        s_pendingLen = n;
         return n;
     }
 
     {
         uint32_t pix = pos - FILEXFER_BMP_HEADER_LEN;
+#if FILEXFER_STATIC_PATTERN
+        uint32_t off = pix % STATIC_PATTERN_BYTES;
+        uint32_t avail = STATIC_PATTERN_BYTES - off;
+        if (avail > remain) avail = remain;
+        if (avail > maxlen) avail = maxlen;
+        *pptr = &s_staticPattern[off];
+        s_pendingLen = (uint16_t)avail;
+        return (uint16_t)avail;
+#else
         uint32_t rowLen = ROW_BYTES;
         uint32_t row = pix / rowLen;
         uint32_t off = pix % rowLen;
-        const uint8_t *src = s_rows[row % ROW_BUF_CNT];
+        const uint8_t *src = s_rows[row % ROW_BUF_CNT].bytes;
+        if (row >= s_genRow)
+        {
+            /* A faster host may drain the prepared rows before the main loop
+             * runs. NAK rather than DMA a stale/partially generated row. */
+            s_needArm = 1;
+            return 0;
+        }
         uint32_t avail = rowLen - off;
+#if USBHS_EP2_BURST_BYTES
+        /* Adjacent ready rows are physically contiguous until the ring wraps.
+         * s_genPos is a COMPLETED cursor, so the producer cannot reuse any
+         * row held by this multi-packet DMA burst. */
+        uint32_t readyRows = s_genRow - row;
+        uint32_t physicalRows = ROW_BUF_CNT - (row % ROW_BUF_CNT);
+        if (readyRows > physicalRows)
+        {
+            readyRows = physicalRows;
+        }
+        avail = readyRows * rowLen - off;
+#endif
         if (avail > remain)
         {
             avail = remain;
@@ -229,8 +286,9 @@ static uint16_t FileXfer_FillCallback(const uint8_t **pptr, uint16_t maxlen)
             avail = maxlen;
         }
         *pptr = &src[off];
-        s_genPos += avail;
+        s_pendingLen = (uint16_t)avail;
         return (uint16_t)avail;
+#endif
     }
 }
 
@@ -239,7 +297,14 @@ void FileXfer_Init(void)
     uint32_t i;
 
     BuildBmpHeader(s_header);
+#if FILEXFER_STATIC_PATTERN
+    for (i = 0; i < STATIC_PATTERN_BYTES; i++)
+    {
+        s_staticPattern[i] = (uint8_t)i ^ (uint8_t)((i / 512u) * 61u);
+    }
+#endif
 
+#if !FILEXFER_STATIC_PATTERN
     for (i = 0; i < FILEXFER_IMG_WIDTH; i++)
     {
         s_blueByCol[i] = (uint8_t)((i * 255u) / (FILEXFER_IMG_WIDTH - 1u));
@@ -248,6 +313,16 @@ void FileXfer_Init(void)
     {
         s_greenByRow[i] = (uint8_t)((i * 255u) / (FILEXFER_IMG_HEIGHT - 1u));
     }
+#if FILEXFER_PACKED_GENERATOR
+    for (i = 0; i < FILEXFER_IMG_WIDTH; i += 4)
+    {
+        uint32_t *words = &s_blueWords[(i / 4) * 3];
+        words[0] = (uint32_t)s_blueByCol[i] | ((uint32_t)s_blueByCol[i + 1] << 24);
+        words[1] = (uint32_t)s_blueByCol[i + 2] << 16;
+        words[2] = (uint32_t)s_blueByCol[i + 3] << 8;
+    }
+#endif
+#endif
 
     USBD_EP2_SetFillCallback(FileXfer_FillCallback);
 }
@@ -256,5 +331,6 @@ void FileXfer_Start(void)
 {
     /* Called from EP0 SETUP (USB ISR) context: only record the request;
      * FileXfer_Pump() in the main loop does the reset + prefill + arm. */
+    USBD_EP2_StopTransfer();
     s_startReq = 1;
 }

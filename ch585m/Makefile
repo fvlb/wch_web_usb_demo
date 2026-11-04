@@ -9,8 +9,21 @@ BUILD_DIR       = _build
 ##### Options #####
 LDSCRIPT        = vendor/Ld/Link.ld
 
-# use printf and UART0
-LIB_FLAGS       = DEBUG=0
+# Verified USBHS throughput profile. These remain overridable for experiments.
+USBHS_EP2_BURST_BYTES       ?= 65024
+USBHS_EP2_PAYLOAD_LIMIT     ?= 512
+FILEXFER_ROW_BUF_CNT        ?= 32
+FILEXFER_RAM_GENERATOR      ?= 1
+FILEXFER_PACKED_GENERATOR   ?= 1
+FILEXFER_STATIC_PATTERN     ?= 0
+OPT                        ?= -O3 -Wextra
+LIB_FLAGS = DEBUG=0 \
+    USBHS_EP2_BURST_BYTES=$(USBHS_EP2_BURST_BYTES) \
+    USBHS_EP2_PAYLOAD_LIMIT=$(USBHS_EP2_PAYLOAD_LIMIT) \
+    FILEXFER_ROW_BUF_CNT=$(FILEXFER_ROW_BUF_CNT) \
+    FILEXFER_RAM_GENERATOR=$(FILEXFER_RAM_GENERATOR) \
+    FILEXFER_PACKED_GENERATOR=$(FILEXFER_PACKED_GENERATOR) \
+    FILEXFER_STATIC_PATTERN=$(FILEXFER_STATIC_PATTERN)
 
 # version == file with number looks like 1015
 VERSION_FILE    = version

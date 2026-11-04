@@ -25,9 +25,8 @@
 #define DEF_USBD_UEP1_SIZE           8       /* endpoint 1 max packet size */
 #define DEF_UPTIME_EVENT_LEN         4       /* payload bytes actually sent */
 
-/* Endpoint 2 IN (bulk): synthetic file download for throughput testing,
- * see filexfer.c. Full-speed bulk max packet size is 64 bytes.            */
-#define DEF_USBD_UEP2_SIZE           64      /* endpoint 2 max packet size */
+/* EP2 DMA capacity. Full-speed descriptors retain their separate 64-byte MPS. */
+#define DEF_USBD_UEP2_SIZE           512u
 
 /******************************************************************************/
 /* Vendor-specific control requests (bmRequestType type = Vendor) handled by

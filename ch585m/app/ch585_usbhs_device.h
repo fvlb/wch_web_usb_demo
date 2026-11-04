@@ -13,15 +13,30 @@
 #ifndef __CH585_USBHS_DEVICE_H__
 #define __CH585_USBHS_DEVICE_H__
 
-/* WinUSB/WebUSB demo endpoint sizes (high-speed: 512-byte bulk EP2). */
-#define DEF_USBD_UEP1_SIZE   64
-#define DEF_USBD_UEP2_SIZE   512
+/* Endpoint sizes have one source of truth: usb_desc.h. Defining them here
+ * before that include silently changed EP2 back to 64 bytes at high speed. */
 
 /*******************************************************************************/
 /* Header File */
 #include "CH58x_common.h"
 #include "string.h"
 #include "usb_desc.h"
+
+/* Diagnostic short-payload sizes keep the HS bulk descriptor at 512 bytes. */
+#ifndef USBHS_EP2_PAYLOAD_LIMIT
+#define USBHS_EP2_PAYLOAD_LIMIT 512u
+#endif
+#if USBHS_EP2_PAYLOAD_LIMIT != 64 && USBHS_EP2_PAYLOAD_LIMIT != 128 && USBHS_EP2_PAYLOAD_LIMIT != 256 && USBHS_EP2_PAYLOAD_LIMIT != 512
+#error "USBHS_EP2_PAYLOAD_LIMIT must be 64, 128, 256 or 512"
+#endif
+
+/* Zero selects ordinary one-packet DMA; nonzero enables multi-packet TX burst. */
+#ifndef USBHS_EP2_BURST_BYTES
+#define USBHS_EP2_BURST_BYTES 0u
+#endif
+#if USBHS_EP2_BURST_BYTES > 65024 || (USBHS_EP2_BURST_BYTES % 512) != 0
+#error "USBHS_EP2_BURST_BYTES must be a multiple of 512, at most 65024"
+#endif
 
 
 #ifdef __cplusplus
@@ -62,8 +77,8 @@ extern "C" {
 
 #define USBHSD_UEP_RXDMA_BASE         0x40009024
 #define USBHSD_UEP_TXDMA_BASE         0x40009040
-#define USBHSD_UEP_TXLEN_BASE         0x404090A0
-#define USBHSD_UEP_TXCTL_BASE         0x404090A2
+#define USBHSD_UEP_TXLEN_BASE         0x400090A0
+#define USBHSD_UEP_TXCTL_BASE         0x400090A2
 #define USBHSD_UEP_TX_EN( N )         ( (uint16_t)( 0x01 << N ) )
 #define USBHSD_UEP_RX_EN( N )         ( (uint16_t)( 0x01 << N ) )
 
@@ -152,10 +167,11 @@ extern uint8_t USBHS_Endp_DataUp( uint8_t endp, uint8_t *pbuf, uint16_t len, uin
 /* Demo API surface - identical to the CH592F FS stack (ch592_usbd_device.h),
  * so the demo app (main/button/filexfer) compiles unchanged. */
 #include <stdint.h>
-volatile extern uint8_t USBD_DevEnumStatus;
-volatile extern uint8_t USBD_EP1_TxBusy;
+extern volatile uint8_t USBD_DevEnumStatus;
+extern volatile uint8_t USBD_EP1_TxBusy;
 typedef uint16_t (*USBD_EP2_FillCallback)(const uint8_t **pptr, uint16_t maxlen);
 void    USBD_Device_Init(void);
 uint8_t USBD_EP1_SendData(const uint8_t *pbuf, uint8_t len);
 void    USBD_EP2_SetFillCallback(USBD_EP2_FillCallback cb);
 void    USBD_EP2_StartTransfer(void);
+void    USBD_EP2_StopTransfer(void);

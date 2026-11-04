@@ -150,6 +150,9 @@ void USBHS_Device_Endp_Init ( void )
     R8_U2EP1_TX_CTRL = USBHS_UEP_T_RES_NAK;
     R16_U2EP2_T_LEN  = 0;
     R8_U2EP2_TX_CTRL = USBHS_UEP_T_RES_NAK;
+    R8_U2EP_T_BURST &= ~RB_EP2_EN;
+    R8_U2EP_T_BURST_MODE &= ~RB_EP2_EN;
+    R16_U2EP_T_TOG_AUTO &= ~RB_EP2_EN;
 
     for( i = 0; i < DEF_UEP_NUM; i++ )
     {
@@ -803,11 +806,16 @@ void USB2_DEVICE_IRQHandler( void )
                 /* end-point 2 data in interrupt */
                 case DEF_UEP2:
                     g_ep2Count++;
-                    R8_U2EP2_TX_CTRL &= ~USBHS_UEP_T_DONE;
                     R8_U2EP2_TX_CTRL = (R8_U2EP2_TX_CTRL & ~USBHS_UEP_T_RES_MASK) | USBHS_UEP_T_RES_NAK;
-                    R8_U2EP2_TX_CTRL ^= USBHS_UEP_T_TOG_DATA1;
+                    if (!(R16_U2EP_T_TOG_AUTO & RB_EP2_EN))
+                    {
+                        R8_U2EP2_TX_CTRL ^= USBHS_UEP_T_TOG_DATA1;
+                    }
                     USBHS_Endp_Busy[ DEF_UEP2 ] &= ~DEF_UEP_BUSY;
                     USBD_EP2_StartTransfer(); /* refill from the demo ring */
+                    /* Publish pointer/length/ACK first; DONE gates ownership until
+                     * this final write, as in CherryUSB's CH585 burst driver. */
+                    R8_U2EP2_TX_CTRL &= ~USBHS_UEP_T_DONE;
                     break;
 
                 default :
@@ -909,7 +917,19 @@ void USBD_EP2_StartTransfer( void )
     if( ( USBHS_Endp_Busy[ DEF_UEP2 ] & DEF_UEP_BUSY ) == 0 )
     {
         const uint8_t *p = NULL;
-        uint16_t n = s_ep2FillCb( &p, DEF_USBD_UEP2_SIZE );
+        uint16_t limit = (R8_USB2_MIS_ST & USBHS_UDMS_HS_MOD) ? USBHS_EP2_PAYLOAD_LIMIT : DEF_USBD_FS_PACK_SIZE;
+#if USBHS_EP2_BURST_BYTES
+        if (R8_USB2_MIS_ST & USBHS_UDMS_HS_MOD)
+        {
+            limit = USBHS_EP2_BURST_BYTES;
+            R8_U2EP_T_BURST |= RB_EP2_EN;
+            /* Suppress an extra ZLP at the end of a full-packet burst. */
+            R8_U2EP_T_BURST_MODE |= RB_EP2_EN;
+            R16_U2EP_T_TOG_AUTO |= RB_EP2_EN;
+        }
+#endif
+        R32_U2EP2_MAX_LEN = (R8_USB2_MIS_ST & USBHS_UDMS_HS_MOD) ? DEF_USBD_HS_PACK_SIZE : DEF_USBD_FS_PACK_SIZE;
+        uint16_t n = s_ep2FillCb( &p, limit );
         if( ( n > 0 ) && ( p != NULL ) )
         {
             /* zero-copy: point the endpoint DMA straight at the source */
@@ -920,6 +940,13 @@ void USBD_EP2_StartTransfer( void )
         }
     }
     PFIC_EnableIRQ( USB2_DEVICE_IRQn );
+}
+
+void USBD_EP2_StopTransfer(void)
+{
+    R8_U2EP2_TX_CTRL = (R8_U2EP2_TX_CTRL & ~USBHS_UEP_T_RES_MASK) | USBHS_UEP_T_RES_NAK;
+    R8_U2EP2_TX_CTRL &= ~USBHS_UEP_T_DONE;
+    USBHS_Endp_Busy[DEF_UEP2] &= ~DEF_UEP_BUSY;
 }
 
 void USBD_Device_Init( void )

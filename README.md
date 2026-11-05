@@ -37,57 +37,29 @@ table, and build/flash instructions:
 - [`ch592f/README.md`](ch592f/README.md)
 - [`ch32v208wb/README.md`](ch32v208wb/README.md)
 
-## CH585M: verified USBHS improvement, 2026-11-04
+## Latest verified measurements
 
-The connected board was identified through WCH-Link and confirmed at **480M**
-on its HS port. The original firmware actually submitted **64-byte short
-packets** despite advertising a 512-byte HS bulk endpoint. After correcting
-that mismatch, producer/DMA ownership, burst mode and SRAM generation:
+Both tested firmwares generate the same **1024×3413-pixel, 10,484,790-byte
+gradient BMP**. Results use 64 KiB host reads and full byte-by-byte verification.
 
-| Workload | Verified throughput | Verification |
-|---|---:|---|
-| Original 3 MiB gradient, one 512-byte host read pending | 1.23–1.24 MB/s | 2 full files |
-| Optimized 3 MiB gradient, 64 KiB host reads | 25.28–26.98 MB/s | 100 full files |
-| **Current 10 MiB gradient**, 64 KiB host reads | **25.62–26.80 MB/s** | **30 full files** |
-| Precomputed diagnostic pattern, burst DMA | 43.17–43.38 MB/s | 10 full files across 2 burst sizes |
+| Board | USB link | Verified throughput | Verification | Date |
+|---|---|---:|---|---|
+| CH585M | High-speed, 480 Mb/s | **25.62–26.80 MB/s** | 30 complete files | 2026-11-04 |
+| CH32V208WB | Full-speed, 12 Mb/s | **0.896 MB/s** | 7 complete files across 3 flashes | 2026-11-05 |
 
-The static-pattern result isolates USB transport; it is not gradient generation
-speed. The default remains the original gradient, now **1024×3413 pixels,
-10,484,790 bytes**. Use large host reads; a serial stream of 512-byte host reads
-still adds substantial scheduling overhead. Details, register references,
-failed experiments and build commands: [CH585 USBHS report](ch585m/USBHS_REPORT.md).
+CH32V307's current candidate still awaits successful hardware enumeration and
+transfer validation. CH32L103 and CH592F have not been remeasured in this campaign.
+
+Implementation details, earlier comparisons and diagnostic workloads:
+
+- [CH585 USBHS report](ch585m/USBHS_REPORT.md)
+- [CH32V208WB USBFS report](ch32v208wb/USBFS_REPORT.md)
+- [CH32V307 bring-up status](ch32v307/USBHS_HANDOFF.md)
 
 ```sh
 make -C tools check
 ch585m/_build/tools/bmp-bench 16 65536 3
 ```
-
-## Historical measurements (earlier shared harness)
-
-The earlier figures below used the same Linux/xHCI host and synthetic 3 MiB
-gradient BMP. The CH585M row is historical, superseded by the measurements above:
-
-| Board    | USB         | Architecture                  | Throughput | ISR/packet | CPU in ISR |
-|----------|-------------|-------------------------------|-----------:|-----------:|-----------:|
-| CH32L103 | full-speed  | ring buffer + memcpy           | ~230 KB/s | —          | —          |
-| CH592F   | full-speed  | **zero-copy DMA from ring**    | **287 KB/s** | **7.8 µs** | **3.6%** |
-| CH585M   | high-speed  | zero-copy rotating rows        | ~1000 KB/s | ~1 µs      | ~2%        |
-| CH32V307 | high-speed  | zero-copy rotating rows        | ~1000 KB/s | 1.2 µs     | 1.9%      |
-
-Notes:
-
-- Full-speed theoretical max: ~1.2 MB/s (19 × 64-byte transactions/frame).
-  The CH592F at 287 KB/s reaches ~24% of this (limited by xHCI NAK-backoff
-  with INT_BUSY; removing INT_BUSY doubles speed but corrupts data).
-- High-speed theoretical max: ~53.25 MB/s. The former attribution of the CH585M
-  ~1 MB/s result solely to a 512-byte-per-IRQ limit was incorrect: it was sending
-  64-byte short packets and also had producer/ownership and flash execution
-  bottlenecks. The CH32V307 has not been remeasured in this campaign.
-- CPU in ISR measured via TMR3/TIM3 at 1 µs resolution (vendor request 0x0C
-  on CH592F and CH32V307).
-- The zero-copy DMA on CH592F uses the same ring buffer as the stock code
-  but the DMA reads directly from the ring slot (no memcpy). One slot of
-  headroom prevents the pump from overwriting a slot the DMA is reading.
 
 ## Web page
 

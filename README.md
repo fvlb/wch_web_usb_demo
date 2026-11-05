@@ -1,88 +1,120 @@
-# wch-usb-demos
+# WCH WinUSB / WebUSB demos
 
-WinUSB / WebUSB LED + file-transfer demo firmwares for several WCH RISC-V
-MCUs, all speaking the **identical USB protocol** (0x1209:0x0001) so a
-single web page can drive any board:
+LED control and generated BMP downloads over USB for five WCH RISC-V MCUs.
+The firmwares share VID/PID **`1209:0001`** and a common control/file-transfer
+protocol, so the same browser page or native client can drive each port.
 
-- [`ch32l103/`](ch32l103) — WCH CH32L103 (QingKe V4C). LED on PB8
-  (hardware TIM4_CH3 PWM), button on PA1.
-- [`ch592f/`](ch592f) — WCH CH592F. LED on PB23 (TMR0 hardware PWM,
-  remapped), button on PB22 (BOOT pin). Zero-copy DMA, interrupt-driven
-  UART TX, CPU profiling (vendor 0x0C).
-- [`ch585m/`](ch585m) — WCH CH585M. LED on PA9 (TMR0 hardware PWM),
-  UART on PA14. USBHS burst DMA, packed SRAM row generation, **~26 MB/s**
-  byte-verified gradient download; default BMP is **~10 MiB**.
-- [`ch32v307/`](ch32v307) — WCH CH32V307 (QingKe V4F). USBHS high-speed,
-  zero-copy rows, DMA UART TX, CPU profiling (vendor 0x0C). LED pin TBD.
-- [`ch32v208wb/`](ch32v208wb) — CH32F&V208W-R0-1v4, CH32V208WB.
-  USBFS on **J1 PB6/PB7**, UART PA9/PA10, LED1 PD2 / heartbeat PD3.
-  **0.896 MB/s** byte-verified ~10 MiB gradients; seven files across three flashes.
+## MCU comparison
 
-Common device protocol:
+Memory figures below are the **application flash and SRAM configured by this
+repository's linker scripts**, not firmware binary sizes or free memory.
 
-- Advertise a BOS descriptor with **Microsoft OS 2.0** (Windows
-  auto-binds `winusb.sys`, no `.inf` file) and **WebUSB** (browser
-  `GET_URL` landing-page) Platform Capabilities side by side.
-- Expose LED brightness control (`SET_LED`/`GET_LED`) and a synthetic BMP
-  streamed over EP2 bulk IN (~10 MiB on CH585M and V208; query request 0x09).
-  Boards with a wired button also report it over EP1 interrupt IN; V208
-  reserves EP1 and reports released because no button pin was specified.
-- Use VID/PID **0x1209 / 0x0001** (the open ["pid.codes" test
-  allocation](https://pid.codes/1209/0001/)).
+| MCU / firmware | Flash (KiB) | SRAM (KiB) | USB peripheral used | USB link rate | BMP throughput |
+|---|---:|---:|---|---:|---:|
+| [CH32L103](ch32l103/README.md) | 64 | 20 | USB full-speed | 12 Mb/s | — |
+| [CH592F](ch592f/README.md) | 448 | 26 | USB full-speed | 12 Mb/s | — |
+| [CH585M](ch585m/README.md) | 448 | 128 | USBHS high-speed | 480 Mb/s | **25.62–26.80 MB/s** |
+| [CH32V208WB](ch32v208wb/README.md) | 160 | 32 | USBFS full-speed, J1 | 12 Mb/s | **0.896 MB/s** |
+| [CH32V307](ch32v307/USBHS_HANDOFF.md) | 288 | 32 | USBHS high-speed candidate | 480 Mb/s | Pending bring-up |
 
-See each project's own README for hardware wiring, the full vendor-request
-table, and build/flash instructions:
+- **USB link rate** is the peripheral's signaling rate; **BMP throughput** is
+  captured application throughput in decimal MB/s. `—` means no current result.
+- CH585M and CH32V208WB results use the same **1024×3413-pixel, 10,484,790-byte
+  gradient BMP** and 64 KiB host reads, captured in November 2026.
+- CH585M and CH592F each have **512 KiB total flash**, including **448 KiB
+  CodeFlash**, 32 KiB DataFlash, 24 KiB bootloader and 8 KiB configuration storage.
+- CH32V208 supports configurable flash/SRAM splits: **128/64**, **144/48** or
+  **160/32 KiB**; this port uses **160/32 KiB**. CH32V307 also has a configurable
+  split; its current linker selects **288/32 KiB**, rather than the common
+  **256/64 KiB** configuration.
 
-- [`ch32l103/README.md`](ch32l103/README.md)
-- [`ch592f/README.md`](ch592f/README.md)
-- [`ch32v208wb/README.md`](ch32v208wb/README.md)
+Memory maps: [CH32L103](ch32l103/Ld/Link.ld),
+[CH592F](ch592f/vendor/Ld/Link.ld), [CH585M](ch585m/vendor/Ld/Link.ld),
+[CH32V208WB](ch32v208wb/vendor/Ld/Link.ld), [CH32V307](ch32v307/vendor/Ld/Link.ld).
 
-## Latest verified measurements
+## Hardware and wiring
 
-Both tested firmwares generate the same **1024×3413-pixel, 10,484,790-byte
-gradient BMP**. Results use 64 KiB host reads and full byte-by-byte verification.
+| Port | USB connection | LED control | Button |
+|---|---|---|---|
+| CH32L103 | Full-speed connector; see board schematic | PB8, TIM4_CH3 PWM | PA1 |
+| CH592F | Full-speed connector | PB23, remapped TMR0 PWM | PB22 / BOOT |
+| CH585M | **HS connector**, not FS | PA9, TMR0 PWM | PB22 |
+| CH32V208WB | **J1, PB6 D− / PB7 D+** on CH32F&V208W-R0-1v4 | PD2 software PWM; PD3 heartbeat | Not assigned |
+| CH32V307 | HS connector; see [bring-up notes](ch32v307/USBHS_HANDOFF.md) | Board LED mapping pending | PB1 placeholder |
 
-| Board | USB link | Verified throughput | Verification | Date |
-|---|---|---:|---|---|
-| CH585M | High-speed, 480 Mb/s | **25.62–26.80 MB/s** | 30 complete files | 2026-11-04 |
-| CH32V208WB | Full-speed, 12 Mb/s | **0.896 MB/s** | 7 complete files across 3 flashes | 2026-11-05 |
+On CH32V208WB, the debug UART is **PA9 TX / PA10 RX, 115200 baud**. J1 is wired
+to the USBFS controller, not the separate PA11/PA12 USBD block. The current setup
+uses a USB-A-to-C data cable; see its [board notes](ch32v208wb/README.md) for CC wiring.
 
-CH32V307's current candidate still awaits successful hardware enumeration and
-transfer validation. CH32L103 and CH592F have not been remeasured in this campaign.
+## Browser demo
 
-Implementation details, earlier comparisons and diagnostic workloads:
+Open **[fvlb.github.io/webusb-led](https://fvlb.github.io/webusb-led/)** in a
+WebUSB-capable browser, connect the board's USB data port, and select the demo
+device. The page controls LED brightness and downloads the generated BMP.
 
-- [CH585 USBHS report](ch585m/USBHS_REPORT.md)
-- [CH32V208WB USBFS report](ch32v208wb/USBFS_REPORT.md)
-- [CH32V307 bring-up status](ch32v307/USBHS_HANDOFF.md)
+The page lives in the separate
+[`fvlb.github.io`](https://github.com/fvlb/fvlb.github.io) repository. Firmware
+advertises Microsoft OS 2.0 / WinUSB and WebUSB platform capabilities in its BOS
+descriptor. The demo uses the [pid.codes test VID/PID](https://pid.codes/1209/0001/).
 
-```sh
-make -C tools check
-ch585m/_build/tools/bmp-bench 16 65536 3
-```
+## Build
 
-## Web page
-
-The browser-side control page is **not** part of this repository. It is
-built and hosted from the separate
-[`fiskov.github.io`](https://github.com/fiskov/fiskov.github.io) repository
-and works with either board, since both speak the same protocol:
-
-- `https://fiskov.github.io/webusb-led/index.html` (one page for both
-  boards, since the protocol is identical)
-
-## Building
-
-Each firmware is a fully independent Make project; build them separately
-from their own directory:
+Use **WCH GCC15** from MounRiver Studio, with `riscv32-wch-elf-*` on `PATH`.
+Several ports use WCH's `xw` instructions, which generic RISC-V toolchains may
+not support. Each directory is an independent Make project; choose a target:
 
 ```sh
 export PATH="/path/to/RISC-V Embedded GCC15/bin:$PATH"
 
-cd ch32l103 && make -j16   # -> ch32l103/_build/winusb_webusb_led.{elf,hex,bin}
-cd ../ch592f && make -j16  # -> ch592f/_build/app.{elf,hex,bin}
-cd ../ch585m && make -j16  # -> ch585m/_build/app.{elf,hex,bin}
+make -C ch32l103 -j8
+make -C ch592f -j8
+make -C ch585m -j8
+make -C ch32v208wb -j8
+make -C ch32v307 -j8
 ```
 
-See [`.vscode/tasks.json`](.vscode/tasks.json) for ready-made VS Code build
-tasks covering both projects.
+| Port | Default firmware output |
+|---|---|
+| CH32L103 | `ch32l103/_build/winusb_webusb_led.{elf,hex,bin}` |
+| CH592F | `ch592f/_build/app.{elf,hex,bin}` |
+| CH585M | `ch585m/_build/app.{elf,hex,bin}` |
+| CH32V208WB | `ch32v208wb/_build/demo.{elf,hex,bin}` |
+| CH32V307 | `ch32v307/_build/app.{elf,hex,bin}` |
+
+Board-specific programming, backup and recovery instructions are in the linked
+port READMEs. For CH585M and CH32V307, use a fresh `BUILD_DIR` when changing
+compiler flags. Existing [VS Code tasks](.vscode/tasks.json) cover CH32L103 and CH592F.
+
+## Native throughput tool
+
+The shared host tool requires a C compiler, `pkg-config` and libusb development
+headers (`libusb-1.0-0-dev` on Debian/Ubuntu). Connect one demo device at a time:
+
+```sh
+make -C tools
+ch585m/_build/tools/bmp-bench 16 65536 3
+```
+
+Arguments are **queue depth**, **read size in bytes**, and **number of downloads**.
+The output reports decimal MB/s. Despite its output directory, the tool is shared
+across MCU ports. Transfer timing ends at the final USB completion.
+
+## USB protocol
+
+| Endpoint | Purpose |
+|---|---|
+| EP0 control | Descriptors, LED brightness, version, timer and transfer commands |
+| EP1 interrupt IN | Button events on ports with a wired button; reserved on V208 |
+| EP2 bulk IN | Generated 24-bit BMP stream |
+
+Query **`GET_FILE_SIZE` (`0x09`)**, send **`START_FILE_XFER` (`0x0A`)**, then read
+EP2 until the reported size is received. The initial **54-byte short packet is
+the BMP header**, not EOF. Use large reads and cap the final read at the remaining
+bytes. V208 reports its unassigned button as released; diagnostic request `0x0C`
+has port-specific counters. Full request tables are in the port documentation.
+
+## Implementation notes
+
+- [CH585M: burst DMA and SRAM gradient generation](ch585m/USBHS_REPORT.md)
+- [CH32V208WB: USBFS initialization and SETUP handling](ch32v208wb/USBFS_REPORT.md)
+- [CH32V307: current bring-up status](ch32v307/USBHS_HANDOFF.md)
